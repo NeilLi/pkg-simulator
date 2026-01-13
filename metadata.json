@@ -1,0 +1,5 @@
+{
+  "name": "PKG Simulator v2.6",
+  "description": "A hospitality domain Policy Knowledge Graph simulator and manager. Features lifecycle management, hot-swap simulation, and Unified Memory context hydration.",
+  "requestFramePermissions": []
+}

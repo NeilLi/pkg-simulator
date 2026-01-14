@@ -341,6 +341,436 @@ app.get('/api/unified-memory', async (req, res) => {
   }
 });
 
+// Create snapshot
+app.post('/api/snapshots', async (req, res) => {
+  try {
+    const { version, env, entrypoint, schemaVersion, checksum, sizeBytes, signature, notes, isActive } = req.body;
+    
+    // If isActive is true, deactivate other snapshots in the same env
+    if (isActive) {
+      await pool.query(
+        'UPDATE pkg_snapshots SET is_active = FALSE WHERE env = $1',
+        [env || 'prod']
+      );
+    }
+    
+    const result = await pool.query(`
+      INSERT INTO pkg_snapshots (version, env, entrypoint, schema_version, checksum, size_bytes, signature, notes, is_active)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      ON CONFLICT (version) DO UPDATE SET
+        env = EXCLUDED.env,
+        entrypoint = EXCLUDED.entrypoint,
+        schema_version = EXCLUDED.schema_version,
+        checksum = EXCLUDED.checksum,
+        size_bytes = EXCLUDED.size_bytes,
+        signature = EXCLUDED.signature,
+        notes = EXCLUDED.notes,
+        is_active = EXCLUDED.is_active
+      RETURNING id, version, env, is_active, checksum, size_bytes, created_at, notes
+    `, [
+      version,
+      env || 'prod',
+      entrypoint || 'data.pkg',
+      schemaVersion || '1',
+      checksum || '0'.repeat(64),
+      sizeBytes || 0,
+      signature || null,
+      notes || null,
+      isActive || false
+    ]);
+    
+    const row = result.rows[0];
+    res.json({
+      id: row.id,
+      version: row.version,
+      env: row.env,
+      isActive: row.is_active,
+      checksum: row.checksum,
+      sizeBytes: row.size_bytes || 0,
+      createdAt: row.created_at.toISOString(),
+      notes: row.notes || undefined,
+    });
+  } catch (error) {
+    console.error('Error creating snapshot:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create subtask type
+app.post('/api/subtask-types', async (req, res) => {
+  try {
+    const { snapshotId, name, defaultParams } = req.body;
+    const result = await pool.query(`
+      INSERT INTO pkg_subtask_types (snapshot_id, name, default_params)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (snapshot_id, name) DO UPDATE SET
+        default_params = EXCLUDED.default_params
+      RETURNING id, snapshot_id, name, default_params
+    `, [snapshotId, name, defaultParams || {}]);
+    
+    const row = result.rows[0];
+    res.json({
+      id: row.id,
+      snapshotId: row.snapshot_id,
+      name: row.name,
+      defaultParams: row.default_params || {},
+    });
+  } catch (error) {
+    console.error('Error creating subtask type:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create rule with conditions and emissions
+app.post('/api/rules', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    
+    const { snapshotId, ruleName, priority, engine, ruleSource, compiledRule, ruleHash, metadata, conditions, emissions } = req.body;
+    
+    // Check if rule already exists (idempotent)
+    const existingCheck = await client.query(
+      'SELECT id FROM pkg_policy_rules WHERE snapshot_id = $1 AND rule_name = $2',
+      [snapshotId, ruleName]
+    );
+    
+    let ruleId;
+    if (existingCheck.rows.length > 0) {
+      // Rule exists, use existing ID
+      ruleId = existingCheck.rows[0].id;
+      // Update the rule with new values
+      await client.query(`
+        UPDATE pkg_policy_rules 
+        SET priority = $1, engine = $2, rule_source = $3, compiled_rule = $4, rule_hash = $5, metadata = $6
+        WHERE id = $7
+      `, [
+        priority || 100,
+        engine || 'wasm',
+        ruleSource || null,
+        compiledRule || null,
+        ruleHash || null,
+        metadata || null,
+        ruleId
+      ]);
+      // Delete existing conditions and emissions to recreate them
+      await client.query('DELETE FROM pkg_rule_conditions WHERE rule_id = $1', [ruleId]);
+      await client.query('DELETE FROM pkg_rule_emissions WHERE rule_id = $1', [ruleId]);
+    } else {
+      // Insert new rule
+      const ruleResult = await client.query(`
+        INSERT INTO pkg_policy_rules (snapshot_id, rule_name, priority, engine, rule_source, compiled_rule, rule_hash, metadata)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING id
+      `, [
+        snapshotId,
+        ruleName,
+        priority || 100,
+        engine || 'wasm',
+        ruleSource || null,
+        compiledRule || null,
+        ruleHash || null,
+        metadata || null
+      ]);
+      ruleId = ruleResult.rows[0].id;
+    }
+    
+    // Insert conditions
+    if (conditions && conditions.length > 0) {
+      for (let i = 0; i < conditions.length; i++) {
+        const cond = conditions[i];
+        await client.query(`
+          INSERT INTO pkg_rule_conditions (rule_id, condition_type, condition_key, operator, value, position)
+          VALUES ($1, $2, $3, $4, $5, $6)
+          ON CONFLICT DO NOTHING
+        `, [
+          ruleId,
+          cond.conditionType,
+          cond.conditionKey,
+          cond.operator,
+          cond.value || null,
+          i
+        ]);
+      }
+    }
+    
+    // Insert emissions
+    if (emissions && emissions.length > 0) {
+      for (let i = 0; i < emissions.length; i++) {
+        const em = emissions[i];
+        await client.query(`
+          INSERT INTO pkg_rule_emissions (rule_id, subtask_type_id, relationship_type, params, position)
+          VALUES ($1, $2, $3, $4, $5)
+          ON CONFLICT DO NOTHING
+        `, [
+          ruleId,
+          em.subtaskTypeId,
+          em.relationshipType,
+          em.params || null,
+          i
+        ]);
+      }
+    }
+    
+    await client.query('COMMIT');
+    
+    // Fetch the complete rule
+    const completeRule = await pool.query(`
+      SELECT 
+        r.id, r.snapshot_id, r.rule_name, r.priority, r.engine, r.disabled,
+        r.rule_source, r.compiled_rule, r.rule_hash, r.metadata
+      FROM pkg_policy_rules r
+      WHERE r.id = $1
+    `, [ruleId]);
+    
+    const conditionsResult = await pool.query(`
+      SELECT rule_id, condition_type, condition_key, operator, value, position
+      FROM pkg_rule_conditions
+      WHERE rule_id = $1
+      ORDER BY position
+    `, [ruleId]);
+    
+    const emissionsResult = await pool.query(`
+      SELECT 
+        e.rule_id, e.subtask_type_id, e.relationship_type, e.params, e.position,
+        st.name as subtask_name
+      FROM pkg_rule_emissions e
+      JOIN pkg_subtask_types st ON e.subtask_type_id = st.id
+      WHERE e.rule_id = $1
+      ORDER BY e.position
+    `, [ruleId]);
+    
+    const ruleRow = completeRule.rows[0];
+    res.json({
+      id: ruleRow.id,
+      snapshotId: ruleRow.snapshot_id,
+      ruleName: ruleRow.rule_name,
+      priority: ruleRow.priority,
+      engine: ruleRow.engine,
+      disabled: ruleRow.disabled,
+      ruleSource: ruleRow.rule_source || undefined,
+      compiledRule: ruleRow.compiled_rule || undefined,
+      ruleHash: ruleRow.rule_hash || undefined,
+      metadata: ruleRow.metadata || undefined,
+      conditions: conditionsResult.rows.map(c => ({
+        ruleId: c.rule_id,
+        conditionType: c.condition_type,
+        conditionKey: c.condition_key,
+        operator: c.operator,
+        value: c.value || undefined,
+      })),
+      emissions: emissionsResult.rows.map(e => ({
+        ruleId: e.rule_id,
+        subtaskTypeId: e.subtask_type_id,
+        subtaskName: e.subtask_name,
+        relationshipType: e.relationship_type,
+        params: e.params || undefined,
+      })),
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error creating rule:', error);
+    res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+// Create fact
+app.post('/api/facts', async (req, res) => {
+  try {
+    const { snapshotId, namespace, subject, predicate, object, validFrom, validTo, createdBy } = req.body;
+    const result = await pool.query(`
+      INSERT INTO facts (snapshot_id, namespace, subject, predicate, object_data, valid_from, valid_to, created_by)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING id::text as id, snapshot_id, namespace, subject, predicate, object_data as object, valid_from, valid_to, created_by
+    `, [
+      snapshotId || null,
+      namespace || 'default',
+      subject,
+      predicate,
+      JSON.stringify(object || {}),
+      validFrom ? new Date(validFrom) : new Date(),
+      validTo ? new Date(validTo) : null,
+      createdBy || 'system'
+    ]);
+    
+    const row = result.rows[0];
+    res.json({
+      id: row.id,
+      snapshotId: row.snapshot_id || undefined,
+      namespace: row.namespace,
+      subject: row.subject,
+      predicate: row.predicate,
+      object: row.object || {},
+      validFrom: row.valid_from.toISOString(),
+      validTo: row.valid_to?.toISOString(),
+      status: 'active',
+      createdBy: row.created_by || undefined,
+    });
+  } catch (error) {
+    console.error('Error creating fact:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Clone snapshot (copy rules, subtask types, conditions, emissions to a new snapshot)
+app.post('/api/snapshots/:sourceId/clone', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    
+    const sourceId = parseInt(req.params.sourceId);
+    const { version, env, notes, isActive } = req.body;
+    
+    // Get source snapshot
+    const sourceSnapshot = await client.query(
+      'SELECT * FROM pkg_snapshots WHERE id = $1',
+      [sourceId]
+    );
+    
+    if (sourceSnapshot.rows.length === 0) {
+      throw new Error(`Source snapshot ${sourceId} not found`);
+    }
+    
+    const source = sourceSnapshot.rows[0];
+    
+    // If isActive is true, deactivate other snapshots in the same env
+    if (isActive) {
+      await client.query(
+        'UPDATE pkg_snapshots SET is_active = FALSE WHERE env = $1',
+        [env || source.env]
+      );
+    }
+    
+    // Create new snapshot
+    const newSnapshotResult = await client.query(`
+      INSERT INTO pkg_snapshots (version, env, entrypoint, schema_version, checksum, size_bytes, signature, notes, is_active)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      RETURNING id, version, env, is_active, checksum, size_bytes, created_at, notes
+    `, [
+      version,
+      env || source.env,
+      source.entrypoint,
+      source.schema_version,
+      '0'.repeat(64), // New checksum
+      source.size_bytes || 0,
+      null, // No signature for cloned snapshot
+      notes || `Cloned from ${source.version}`,
+      isActive || false
+    ]);
+    
+    const newSnapshotId = newSnapshotResult.rows[0].id;
+    
+    // Clone subtask types
+    const subtaskTypesResult = await client.query(
+      'SELECT id, name, default_params FROM pkg_subtask_types WHERE snapshot_id = $1',
+      [sourceId]
+    );
+    
+    const subtaskTypeMapping = new Map(); // old_id -> new_id
+    
+    for (const subtask of subtaskTypesResult.rows) {
+      const newSubtaskResult = await client.query(`
+        INSERT INTO pkg_subtask_types (snapshot_id, name, default_params)
+        VALUES ($1, $2, $3)
+        RETURNING id
+      `, [newSnapshotId, subtask.name, subtask.default_params]);
+      subtaskTypeMapping.set(subtask.id, newSubtaskResult.rows[0].id);
+    }
+    
+    // Clone rules with conditions and emissions
+    const rulesResult = await client.query(`
+      SELECT id, rule_name, priority, engine, rule_source, compiled_rule, rule_hash, metadata
+      FROM pkg_policy_rules
+      WHERE snapshot_id = $1
+    `, [sourceId]);
+    
+    for (const rule of rulesResult.rows) {
+      // Insert new rule
+      const newRuleResult = await client.query(`
+        INSERT INTO pkg_policy_rules (snapshot_id, rule_name, priority, engine, rule_source, compiled_rule, rule_hash, metadata)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING id
+      `, [
+        newSnapshotId,
+        rule.rule_name,
+        rule.priority,
+        rule.engine,
+        rule.rule_source,
+        rule.compiled_rule,
+        rule.rule_hash,
+        rule.metadata
+      ]);
+      
+      const newRuleId = newRuleResult.rows[0].id;
+      
+      // Clone conditions
+      const conditionsResult = await client.query(
+        'SELECT condition_type, condition_key, operator, value, position FROM pkg_rule_conditions WHERE rule_id = $1 ORDER BY position',
+        [rule.id]
+      );
+      
+      for (const cond of conditionsResult.rows) {
+        await client.query(`
+          INSERT INTO pkg_rule_conditions (rule_id, condition_type, condition_key, operator, value, position)
+          VALUES ($1, $2, $3, $4, $5, $6)
+        `, [
+          newRuleId,
+          cond.condition_type,
+          cond.condition_key,
+          cond.operator,
+          cond.value,
+          cond.position
+        ]);
+      }
+      
+      // Clone emissions (with subtask type mapping)
+      const emissionsResult = await client.query(
+        'SELECT subtask_type_id, relationship_type, params, position FROM pkg_rule_emissions WHERE rule_id = $1 ORDER BY position',
+        [rule.id]
+      );
+      
+      for (const em of emissionsResult.rows) {
+        const newSubtaskTypeId = subtaskTypeMapping.get(em.subtask_type_id);
+        if (newSubtaskTypeId) {
+          await client.query(`
+            INSERT INTO pkg_rule_emissions (rule_id, subtask_type_id, relationship_type, params, position)
+            VALUES ($1, $2, $3, $4, $5)
+          `, [
+            newRuleId,
+            newSubtaskTypeId,
+            em.relationship_type,
+            em.params,
+            em.position
+          ]);
+        }
+      }
+    }
+    
+    await client.query('COMMIT');
+    
+    // Fetch the complete new snapshot
+    const newSnapshot = newSnapshotResult.rows[0];
+    res.json({
+      id: newSnapshot.id,
+      version: newSnapshot.version,
+      env: newSnapshot.env,
+      isActive: newSnapshot.is_active,
+      checksum: newSnapshot.checksum,
+      sizeBytes: newSnapshot.size_bytes || 0,
+      createdAt: newSnapshot.created_at.toISOString(),
+      notes: newSnapshot.notes || undefined,
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error cloning snapshot:', error);
+    res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 Database proxy server running on http://localhost:${PORT}`);
   const dbName = process.env.POSTGRES_DB || 'seedcore';

@@ -16,12 +16,14 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
   useEffect(() => {
     const loadData = async () => {
       try {
+        // Always load facts for stats display, and load unified memory if needed
+        const [fcts, mem] = await Promise.all([
+          getFacts(),
+          isMemory ? getUnifiedMemory(100) : Promise.resolve([]),
+        ]);
+        setFacts(fcts);
         if (isMemory) {
-          const mem = await getUnifiedMemory(100);
           setUnifiedMemory(mem);
-        } else {
-          const fcts = await getFacts();
-          setFacts(fcts);
         }
       } catch (error) {
         console.error('Error loading knowledge base data:', error);
@@ -49,8 +51,8 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
       {/* Header Stats */}
       <div className="grid grid-cols-1 gap-5 sm:grid-cols-3">
         <div className="bg-white overflow-hidden shadow rounded-lg px-4 py-5 sm:p-6">
-          <dt className="text-sm font-medium text-gray-500 truncate">Total Facts</dt>
-          <dd className="mt-1 text-3xl font-semibold text-gray-900">{facts.length}</dd>
+          <dt className="text-sm font-medium text-gray-500 truncate">Active Facts</dt>
+          <dd className="mt-1 text-3xl font-semibold text-gray-900">{facts.filter(f => f.status === 'active').length}</dd>
         </div>
         <div className="bg-white overflow-hidden shadow rounded-lg px-4 py-5 sm:p-6">
           <dt className="text-sm font-medium text-gray-500 truncate">Unified Memory Items</dt>

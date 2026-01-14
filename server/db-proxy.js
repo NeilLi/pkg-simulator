@@ -580,9 +580,13 @@ app.post('/api/rules', async (req, res) => {
 app.post('/api/facts', async (req, res) => {
   try {
     const { snapshotId, namespace, subject, predicate, object, validFrom, validTo, createdBy } = req.body;
+    
+    // Generate text representation of the fact (required field)
+    const factText = `${subject} ${predicate} ${JSON.stringify(object || {})}`;
+    
     const result = await pool.query(`
-      INSERT INTO facts (snapshot_id, namespace, subject, predicate, object_data, valid_from, valid_to, created_by)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      INSERT INTO facts (snapshot_id, namespace, subject, predicate, object_data, text, valid_from, valid_to, created_by)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       RETURNING id::text as id, snapshot_id, namespace, subject, predicate, object_data as object, valid_from, valid_to, created_by
     `, [
       snapshotId || null,
@@ -590,6 +594,7 @@ app.post('/api/facts', async (req, res) => {
       subject,
       predicate,
       JSON.stringify(object || {}),
+      factText,
       validFrom ? new Date(validFrom) : new Date(),
       validTo ? new Date(validTo) : null,
       createdBy || 'system'

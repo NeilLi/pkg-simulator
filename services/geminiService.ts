@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import { Snapshot, Rule, Fact, SubtaskType } from "../types";
+import { Snapshot, Rule, Fact, SubtaskType, EvolutionProposal } from "../types";
 
 export interface GenerateRuleParams {
   prompt: string;
@@ -278,7 +278,7 @@ export const generateFactFromNaturalLanguage = async (params: GenerateFactParams
         systemInstruction: systemInstruction,
         responseMimeType: "application/json",
       }
-    });
+    }); 
 
     const text = response.text;
     if (!text) return null;
@@ -298,6 +298,78 @@ export const generateFactFromNaturalLanguage = async (params: GenerateFactParams
 
   } catch (error) {
     console.error("Gemini Fact Generation Error:", error);
+    return null;
+  }
+};
+
+export const generateEvolutionPlan = async (
+  intent: string, 
+  currentVersion: string, 
+  contextFacts: any[]
+): Promise<EvolutionProposal | null> => {
+  if (!process.env.API_KEY) return null;
+
+  try {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const systemInstruction = `
+      You are the "Policy Evolution Agent" for SeedCore (Hospitality PKG).
+      Your job is to analyze human intent or failure logs and propose specific, structured changes to the policy graph.
+
+      Rules:
+      1. You cannot delete facts, only rules.
+      2. You must provide a "rationale" for every change.
+      3. Your output must be a JSON object matching the EvolutionProposal schema (excluding id/status).
+      4. Suggest a semantic version bump.
+
+      Schema:
+      {
+        "newVersion": "vX.Y.Z",
+        "reason": "Executive summary of the change plan",
+        "changes": [
+          {
+            "action": "CREATE" | "MODIFY" | "DELETE",
+            "ruleId": "string (only for modify/delete)",
+            "rationale": "Why this specific change?",
+            "ruleData": { ... Rule Object Structure ... } (only for create/modify)
+          }
+        ]
+      }
+    `;
+
+    const userPrompt = `
+      Current Version: ${currentVersion}
+      Context/Facts Sample: ${JSON.stringify(contextFacts.slice(0, 3))}
+      
+      Human Intent / Incident Log:
+      "${intent}"
+
+      Propose a safe evolution plan.
+    `;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: userPrompt,
+      config: {
+        systemInstruction: systemInstruction,
+        responseMimeType: "application/json",
+      }
+    });
+
+    const text = response.text;
+    if (!text) return null;
+
+    const data = JSON.parse(text);
+    
+    return {
+      id: `prop-${Date.now()}`,
+      baseSnapshotId: 0, // Assigned by caller
+      status: 'PENDING',
+      generatedAt: new Date().toISOString(),
+      ...data
+    };
+
+  } catch (error) {
+    console.error("Evolution Agent Error:", error);
     return null;
   }
 };

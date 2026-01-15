@@ -34,15 +34,19 @@ export enum PkgRelation {
   GATE = 'GATE'
 }
 
+export type SnapshotStage = 'DRAFT' | 'VALIDATING' | 'VALIDATED' | 'CANARY' | 'PROD' | 'ARCHIVED';
+
 export interface Snapshot {
   id: number;
   version: string;
   env: PkgEnv;
+  stage: SnapshotStage;
   isActive: boolean;
   checksum: string;
   sizeBytes: number;
   createdAt: string;
   notes?: string;
+  parentId?: number;
 }
 
 export interface SubtaskType {
@@ -61,11 +65,6 @@ export interface Rule {
   conditions: Condition[];
   emissions: Emission[];
   disabled: boolean;
-  // Additional fields from PKG DAO (optional)
-  ruleSource?: string;
-  compiledRule?: string;
-  ruleHash?: string;
-  metadata?: any;
 }
 
 export interface Condition {
@@ -116,8 +115,6 @@ export interface Deployment {
   percent: number;
   isActive: boolean;
   activatedAt: string;
-  activatedBy?: string;
-  snapshotVersion?: string; // From JOIN with pkg_snapshots
 }
 
 export interface ValidationRun {
@@ -126,7 +123,12 @@ export interface ValidationRun {
   startedAt: string;
   finishedAt?: string;
   success?: boolean;
-  report?: any;
+  report?: {
+    passed: number;
+    failed: number;
+    conflicts: string[];
+    simulationScore: number;
+  };
 }
 
 export interface SimulationResult {
@@ -134,4 +136,31 @@ export interface SimulationResult {
   success: boolean;
   emissions: Emission[];
   logs: string[];
+}
+
+// --- Agent & Evolution Types ---
+
+export interface EvolutionProposal {
+  id: string;
+  baseSnapshotId: number;
+  newVersion: string;
+  reason: string;
+  changes: RuleChange[];
+  status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'APPLIED';
+  generatedAt: string;
+}
+
+export interface RuleChange {
+  action: 'CREATE' | 'MODIFY' | 'DELETE';
+  ruleData?: Partial<Rule>; // For CREATE/MODIFY
+  ruleId?: string; // For MODIFY/DELETE
+  rationale: string;
+}
+
+export interface AgentLog {
+  id: string;
+  agent: 'EVOLUTION' | 'VALIDATION' | 'DEPLOYMENT';
+  message: string;
+  timestamp: string;
+  level: 'INFO' | 'WARN' | 'ERROR' | 'SUCCESS';
 }

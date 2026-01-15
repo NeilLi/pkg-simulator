@@ -1,5 +1,5 @@
 import React from 'react';
-import { Activity, Database, GitBranch, Play, LayoutDashboard, BrainCircuit } from 'lucide-react';
+import { Activity, Database, GitBranch, Play, LayoutDashboard, BrainCircuit, Cpu } from 'lucide-react';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -10,6 +10,7 @@ interface LayoutProps {
 export const Layout: React.FC<LayoutProps> = ({ children, activePage, onNavigate }) => {
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+    { id: 'control-plane', label: 'Control Plane', icon: Cpu },
     { id: 'factory', label: 'Policy Factory', icon: GitBranch },
     { id: 'simulator', label: 'Simulator', icon: Play },
     { id: 'knowledge', label: 'Knowledge Graph', icon: Database },

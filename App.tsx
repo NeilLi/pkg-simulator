@@ -4,6 +4,7 @@ import { Dashboard } from './pages/Dashboard';
 import { PolicyFactory } from './pages/PolicyFactory';
 import { Simulator } from './pages/Simulator';
 import { KnowledgeBase } from './pages/KnowledgeBase';
+import { ControlPlane } from './pages/ControlPlane';
 
 export default function App() {
   const [activePage, setActivePage] = useState('dashboard');
@@ -12,6 +13,8 @@ export default function App() {
     switch (activePage) {
       case 'dashboard':
         return <Dashboard />;
+      case 'control-plane':
+        return <ControlPlane />;
       case 'factory':
         return <PolicyFactory />;
       case 'simulator':

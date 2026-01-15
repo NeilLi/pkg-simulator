@@ -337,6 +337,97 @@ app.get('/api/deployments/active', async (req, res) => {
   }
 });
 
+// Get deployment coverage (intent vs reality: deployments vs device_versions)
+app.get('/api/deployments/coverage', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        target,
+        region,
+        snapshot_id,
+        version,
+        devices_on_snapshot,
+        devices_total
+      FROM pkg_deployment_coverage
+      ORDER BY target, region, snapshot_id DESC
+    `);
+    
+    res.json(result.rows.map(row => ({
+      target: row.target,
+      region: row.region,
+      snapshotId: row.snapshot_id,
+      version: row.version,
+      devicesOnSnapshot: Number(row.devices_on_snapshot || 0),
+      devicesTotal: Number(row.devices_total || 0),
+    })));
+  } catch (error) {
+    console.error('Error fetching deployment coverage:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get rollout events (audit trail for canary deployments)
+app.get('/api/deployments/events', async (req, res) => {
+  try {
+    const target = req.query.target;
+    const region = req.query.region;
+    const limit = req.query.limit ? parseInt(req.query.limit) : null;
+    
+    let query = `
+      SELECT 
+        id,
+        target,
+        region,
+        snapshot_id,
+        from_percent,
+        to_percent,
+        is_rollback,
+        actor,
+        validation_run_id,
+        created_at
+      FROM pkg_rollout_events
+      WHERE 1=1
+    `;
+    const params = [];
+    let paramIndex = 1;
+    
+    if (target) {
+      query += ` AND target = $${paramIndex++}`;
+      params.push(target);
+    }
+    
+    if (region) {
+      query += ` AND region = $${paramIndex++}`;
+      params.push(region);
+    }
+    
+    query += ` ORDER BY created_at DESC`;
+    
+    if (limit && limit > 0) {
+      query += ` LIMIT $${paramIndex++}`;
+      params.push(limit);
+    }
+    
+    const result = await pool.query(query, params);
+    
+    res.json(result.rows.map(row => ({
+      id: row.id,
+      target: row.target,
+      region: row.region,
+      snapshotId: row.snapshot_id,
+      fromPercent: row.from_percent ?? null,
+      toPercent: row.to_percent ?? 0,
+      isRollback: !!(row.is_rollback),
+      actor: row.actor ?? 'system',
+      validationRunId: row.validation_run_id ?? null,
+      createdAt: row.created_at.toISOString(),
+    })));
+  } catch (error) {
+    console.error('Error fetching rollout events:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Create or update deployment (idempotent: upsert by snapshot_id + target + region + deployment_key)
 app.post('/api/deployments', async (req, res) => {
   // Check column existence BEFORE starting transaction to avoid transaction abort issues
@@ -1490,6 +1581,8 @@ app.listen(PORT, () => {
   console.log(`   PATCH  /api/snapshots/:id`);
   console.log(`   GET    /api/deployments`);
   console.log(`   GET    /api/deployments/active`);
+  console.log(`   GET    /api/deployments/coverage`);
+  console.log(`   GET    /api/deployments/events`);
   console.log(`   POST   /api/deployments`);
   console.log(`   GET    /api/validation-runs`);
   console.log(`   POST   /api/validation-runs/start`);

@@ -127,6 +127,7 @@ export interface Deployment {
   percent: number;
   isActive: boolean;
   activatedAt: string;
+  activatedBy?: string; // Who activated the deployment (default: 'system')
   deploymentKey?: string; // For explicit idempotency (default: 'default')
   validationRunId?: number; // Optional reference to validation run
 }

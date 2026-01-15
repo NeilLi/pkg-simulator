@@ -132,11 +132,11 @@ export async function getUnifiedMemory(limit?: number): Promise<UnifiedMemoryIte
 }
 
 // Fetch deployments (with caching)
-export async function getDeployments(): Promise<Deployment[]> {
+export async function getDeployments(activeOnly: boolean = false): Promise<Deployment[]> {
   await initializeDatabase();
   if (!deploymentsCache || !isCacheValid()) {
     try {
-      deploymentsCache = await fetchDeployments();
+      deploymentsCache = await fetchDeployments(activeOnly);
       cacheTimestamp = Date.now();
     } catch (error) {
       console.error('Error fetching deployments:', error);

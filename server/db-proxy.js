@@ -82,6 +82,38 @@ app.get('/api/snapshots', async (req, res) => {
   }
 });
 
+// Get a single snapshot by ID
+app.get('/api/snapshots/:id', async (req, res) => {
+  try {
+    const snapshotId = parseInt(req.params.id);
+    const result = await pool.query(`
+      SELECT 
+        id, version, env, is_active, checksum, size_bytes, created_at, notes
+      FROM pkg_snapshots
+      WHERE id = $1
+    `, [snapshotId]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: `Snapshot ${snapshotId} not found` });
+    }
+    
+    const row = result.rows[0];
+    res.json({
+      id: row.id,
+      version: row.version,
+      env: row.env,
+      isActive: row.is_active,
+      checksum: row.checksum,
+      sizeBytes: row.size_bytes || 0,
+      createdAt: row.created_at.toISOString(),
+      notes: row.notes || undefined,
+    });
+  } catch (error) {
+    console.error('Error fetching snapshot:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Get subtask types
 app.get('/api/subtask-types', async (req, res) => {
   try {
@@ -206,22 +238,53 @@ app.get('/api/deployments', async (req, res) => {
     const activeOnly = req.query.active_only !== 'false'; // Default to true
     const activeFilter = activeOnly ? 'AND d.is_active = TRUE' : '';
     
+    // Check if optional columns exist
+    let hasValidationRunIdColumn = false;
+    let hasDeploymentKeyColumn = false;
+    
+    try {
+      const colCheck = await pool.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name = 'pkg_deployments' 
+          AND column_name IN ('validation_run_id', 'deployment_key')
+      `);
+      const colNames = colCheck.rows.map(r => r.column_name);
+      hasValidationRunIdColumn = colNames.includes('validation_run_id');
+      hasDeploymentKeyColumn = colNames.includes('deployment_key');
+    } catch (err) {
+      // If we can't check, assume columns don't exist
+      console.warn('Could not check column existence:', err.message);
+    }
+    
+    const selectColumns = [
+      'd.id', 
+      'd.snapshot_id', 
+      'd.target', 
+      'd.region', 
+      'd.percent', 
+      'd.is_active', 
+      'd.activated_at',
+      'd.activated_by',
+      's.version AS snapshot_version'
+    ];
+    
+    if (hasValidationRunIdColumn) {
+      selectColumns.splice(-1, 0, 'd.validation_run_id');
+    }
+    
+    if (hasDeploymentKeyColumn) {
+      selectColumns.splice(-1, 0, 'd.deployment_key');
+    }
+    
     const result = await pool.query(`
-      SELECT 
-        d.id, 
-        d.snapshot_id, 
-        d.target, 
-        d.region, 
-        d.percent, 
-        d.is_active, 
-        d.activated_at,
-        d.activated_by,
-        s.version AS snapshot_version
+      SELECT ${selectColumns.join(', ')}
       FROM pkg_deployments d
       JOIN pkg_snapshots s ON s.id = d.snapshot_id
       WHERE 1=1 ${activeFilter}
       ORDER BY d.activated_at DESC
     `);
+    
     res.json(result.rows.map(row => ({
       id: row.id,
       snapshotId: row.snapshot_id,
@@ -232,10 +295,362 @@ app.get('/api/deployments', async (req, res) => {
       activatedAt: row.activated_at.toISOString(),
       activatedBy: row.activated_by || undefined,
       snapshotVersion: row.snapshot_version,
+      validationRunId: row.validation_run_id || undefined,
+      deploymentKey: row.deployment_key || undefined,
     })));
   } catch (error) {
     console.error('Error fetching deployments:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+// Enhancement C: Get active deployments (read model for live system state)
+app.get('/api/deployments/active', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        d.target,
+        d.region,
+        d.percent,
+        d.activated_at,
+        d.activated_by,
+        s.version AS snapshot,
+        s.id AS snapshot_id
+      FROM pkg_deployments d
+      JOIN pkg_snapshots s ON s.id = d.snapshot_id
+      WHERE d.is_active = TRUE
+      ORDER BY d.target, d.region, d.activated_at DESC
+    `);
+    
+    res.json(result.rows.map(row => ({
+      target: row.target,
+      region: row.region,
+      snapshot: row.snapshot,
+      snapshotId: row.snapshot_id,
+      percent: row.percent,
+      activatedAt: row.activated_at.toISOString(),
+      activatedBy: row.activated_by || 'system',
+    })));
+  } catch (error) {
+    console.error('Error fetching active deployments:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create or update deployment (idempotent: upsert by snapshot_id + target + region + deployment_key)
+app.post('/api/deployments', async (req, res) => {
+  // Check column existence BEFORE starting transaction to avoid transaction abort issues
+  let hasDeploymentKeyColumn = false;
+  let hasValidationRunIdColumn = false;
+  
+  try {
+    const colCheck = await pool.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'pkg_deployments' 
+        AND column_name IN ('deployment_key', 'validation_run_id')
+    `);
+    const colNames = colCheck.rows.map(r => r.column_name);
+    hasDeploymentKeyColumn = colNames.includes('deployment_key');
+    hasValidationRunIdColumn = colNames.includes('validation_run_id');
+  } catch (err) {
+    // If we can't check, assume columns don't exist
+    console.warn('Could not check column existence:', err.message);
+  }
+  
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    
+    const { snapshotId, target, region, percent, isActive, activatedBy, deploymentKey, isRollback, validationRunId } = req.body;
+    
+    if (!snapshotId || !target || percent === undefined) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'snapshotId, target, and percent are required' });
+    }
+    
+    // Validate percent is 0-100
+    if (percent < 0 || percent > 100) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'percent must be between 0 and 100' });
+    }
+    
+    const effectiveRegion = region || 'global';
+    const effectiveActivatedBy = activatedBy || 'system';
+    const effectiveDeploymentKey = deploymentKey || 'default';
+    
+    // Issue 2: Enforce percent=0 means inactive
+    // Never allow percent=0 AND is_active=true
+    const effectiveIsActive = (percent === 0) ? false : (isActive !== undefined ? isActive : true);
+    
+    // Enhancement A: Explicitly deactivate previous active deployment for same (target, region)
+    // This ensures only one active deployment per (target, region) regardless of snapshot_id
+    
+    let previousActive;
+    if (hasDeploymentKeyColumn) {
+      previousActive = await client.query(`
+        SELECT 
+          d.id, 
+          d.snapshot_id, 
+          d.target, 
+          d.region, 
+          d.percent, 
+          d.is_active, 
+          d.activated_at,
+          d.activated_by,
+          s.version AS snapshot_version
+        FROM pkg_deployments d
+        JOIN pkg_snapshots s ON s.id = d.snapshot_id
+        WHERE d.target = $1 
+          AND d.region = $2 
+          AND d.is_active = true
+          AND (d.deployment_key IS NULL OR d.deployment_key = $3)
+        ORDER BY d.activated_at DESC
+        LIMIT 1
+      `, [target, effectiveRegion, effectiveDeploymentKey]);
+    } else {
+      previousActive = await client.query(`
+        SELECT 
+          d.id, 
+          d.snapshot_id, 
+          d.target, 
+          d.region, 
+          d.percent, 
+          d.is_active, 
+          d.activated_at,
+          d.activated_by,
+          s.version AS snapshot_version
+        FROM pkg_deployments d
+        JOIN pkg_snapshots s ON s.id = d.snapshot_id
+        WHERE d.target = $1 
+          AND d.region = $2 
+          AND d.is_active = true
+        ORDER BY d.activated_at DESC
+        LIMIT 1
+      `, [target, effectiveRegion]);
+    }
+    
+    let previousDeployment = null;
+    if (previousActive.rows.length > 0) {
+      previousDeployment = {
+        id: previousActive.rows[0].id,
+        snapshotId: previousActive.rows[0].snapshot_id,
+        target: previousActive.rows[0].target,
+        region: previousActive.rows[0].region,
+        percent: previousActive.rows[0].percent,
+        isActive: previousActive.rows[0].is_active,
+        activatedAt: previousActive.rows[0].activated_at.toISOString(),
+        activatedBy: previousActive.rows[0].activated_by || undefined,
+        snapshotVersion: previousActive.rows[0].snapshot_version,
+      };
+      
+      // Deactivate previous active deployment
+      await client.query(`
+        UPDATE pkg_deployments 
+        SET is_active = false
+        WHERE id = $1
+      `, [previousActive.rows[0].id]);
+    }
+    
+    // Issue 3: Validate monotonic increase (unless explicitly rolling back)
+    // Check if deployment already exists for this snapshot + target + region + deployment_key
+    let existingCheck;
+    if (hasDeploymentKeyColumn) {
+      existingCheck = await client.query(
+        `SELECT id, percent, is_active 
+         FROM pkg_deployments 
+         WHERE snapshot_id = $1 AND target = $2 AND region = $3 
+           AND (deployment_key IS NULL OR deployment_key = $4)
+         ORDER BY activated_at DESC
+         LIMIT 1`,
+        [snapshotId, target, effectiveRegion, effectiveDeploymentKey]
+      );
+    } else {
+      existingCheck = await client.query(
+        `SELECT id, percent, is_active 
+         FROM pkg_deployments 
+         WHERE snapshot_id = $1 AND target = $2 AND region = $3 
+         ORDER BY activated_at DESC
+         LIMIT 1`,
+        [snapshotId, target, effectiveRegion]
+      );
+    }
+    
+    // Fix 3: Server-side no-op detection
+    if (existingCheck.rows.length > 0) {
+      const existingPercent = existingCheck.rows[0].percent;
+      const existingId = existingCheck.rows[0].id;
+      
+      // If percent is unchanged, return no-op response
+      if (existingPercent === percent) {
+        await client.query('COMMIT');
+        
+        // Fetch the existing deployment to return it
+        const existingResult = await pool.query(`
+          SELECT 
+            d.id, 
+            d.snapshot_id, 
+            d.target, 
+            d.region, 
+            d.percent, 
+            d.is_active, 
+            d.activated_at,
+            d.activated_by,
+            s.version AS snapshot_version
+          FROM pkg_deployments d
+          JOIN pkg_snapshots s ON s.id = d.snapshot_id
+          WHERE d.id = $1
+        `, [existingId]);
+        
+        if (existingResult.rows.length > 0) {
+          const row = existingResult.rows[0];
+          return res.json({
+            current: {
+              id: row.id,
+              snapshotId: row.snapshot_id,
+              target: row.target,
+              region: row.region,
+              percent: row.percent,
+              isActive: row.is_active,
+              activatedAt: row.activated_at.toISOString(),
+              activatedBy: row.activated_by || undefined,
+              snapshotVersion: row.snapshot_version,
+              noop: true, // Mark as no-op
+            },
+            previous: previousDeployment,
+          });
+        }
+      }
+      
+      // Validate monotonic increase (unless explicitly rolling back)
+      if (!isRollback && percent < existingPercent) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ 
+          error: `Deployment percent cannot decrease from ${existingPercent}% to ${percent}% unless explicitly rolling back. Set isRollback=true to allow decrease.` 
+        });
+      }
+    }
+    
+    let deploymentId;
+    if (existingCheck.rows.length > 0) {
+      // Update existing deployment
+      deploymentId = existingCheck.rows[0].id;
+      
+      // Build update query with optional validation_run_id
+      // Check if validation_run_id column exists
+      let hasValidationRunIdColumn = false;
+      try {
+        const colCheck = await client.query(`
+          SELECT column_name 
+          FROM information_schema.columns 
+          WHERE table_name = 'pkg_deployments' AND column_name = 'validation_run_id'
+        `);
+        hasValidationRunIdColumn = colCheck.rows.length > 0;
+      } catch (err) {
+        hasValidationRunIdColumn = false;
+      }
+      
+      const updates = ['percent = $1', 'is_active = $2', 'activated_at = NOW()', 'activated_by = $3'];
+      const values = [percent, effectiveIsActive, effectiveActivatedBy];
+      let paramIndex = 4;
+      
+      if (hasValidationRunIdColumn && validationRunId !== undefined) {
+        updates.push(`validation_run_id = $${paramIndex++}`);
+        values.push(validationRunId);
+      }
+      
+      values.push(deploymentId);
+      updates.push(`WHERE id = $${paramIndex}`);
+      
+      await client.query(`
+        UPDATE pkg_deployments 
+        SET ${updates.join(', ')}
+      `, values);
+    } else {
+      // Create new deployment
+      // Build insert columns based on what exists in the database
+      const insertColumns = ['snapshot_id', 'target', 'region', 'percent', 'is_active', 'activated_by'];
+      const insertValues = [snapshotId, target, effectiveRegion, percent, effectiveIsActive, effectiveActivatedBy];
+      
+      // Add optional columns if they exist
+      // (hasValidationRunIdColumn already checked before transaction)
+      if (hasDeploymentKeyColumn) {
+        insertColumns.push('deployment_key');
+        insertValues.push(effectiveDeploymentKey);
+      }
+      
+      if (hasValidationRunIdColumn && validationRunId !== undefined) {
+        insertColumns.push('validation_run_id');
+        insertValues.push(validationRunId);
+      }
+      
+      const placeholders = insertColumns.map((_, i) => `$${i + 1}`).join(', ');
+      const insertResult = await client.query(`
+        INSERT INTO pkg_deployments (${insertColumns.join(', ')})
+        VALUES (${placeholders})
+        RETURNING id
+      `, insertValues);
+      deploymentId = insertResult.rows[0].id;
+    }
+    
+    await client.query('COMMIT');
+    
+    // Fetch the complete deployment with snapshot version (using new connection since transaction is committed)
+    // Build SELECT based on what columns exist
+    const selectColumns = [
+      'd.id', 
+      'd.snapshot_id', 
+      'd.target', 
+      'd.region', 
+      'd.percent', 
+      'd.is_active', 
+      'd.activated_at',
+      'd.activated_by',
+      's.version AS snapshot_version'
+    ];
+    
+    if (hasDeploymentKeyColumn) {
+      selectColumns.splice(-1, 0, 'd.deployment_key');
+    }
+    
+    // (hasValidationRunIdColumn already checked before transaction)
+    if (hasValidationRunIdColumn) {
+      selectColumns.splice(-1, 0, 'd.validation_run_id');
+    }
+    
+    const result = await pool.query(`
+      SELECT ${selectColumns.join(', ')}
+      FROM pkg_deployments d
+      JOIN pkg_snapshots s ON s.id = d.snapshot_id
+      WHERE d.id = $1
+    `, [deploymentId]);
+    
+    const row = result.rows[0];
+    
+    // Enhancement B: Return both current and previous deployment
+    res.json({
+      current: {
+        id: row.id,
+        snapshotId: row.snapshot_id,
+        target: row.target,
+        region: row.region,
+        percent: row.percent,
+        isActive: row.is_active,
+        activatedAt: row.activated_at.toISOString(),
+        activatedBy: row.activated_by || undefined,
+        snapshotVersion: row.snapshot_version,
+        validationRunId: row.validation_run_id || undefined,
+        deploymentKey: row.deployment_key || effectiveDeploymentKey,
+        noop: false, // Not a no-op since we created/updated
+      },
+      previous: previousDeployment,
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error creating/updating deployment:', error);
+    res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
   }
 });
 
@@ -776,8 +1191,216 @@ app.post('/api/snapshots/:sourceId/clone', async (req, res) => {
   }
 });
 
+// Update snapshot
+// Promote snapshot to WASM (ID-based lookup)
+app.post('/api/snapshots/:id/promote', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    
+    const snapshotId = parseInt(req.params.id);
+    const { checksum, sizeBytes, artifactFormat } = req.body;
+    
+    console.log(`[POST /api/snapshots/${snapshotId}/promote] Looking up snapshot by id=${snapshotId}`);
+    
+    // Verify snapshot exists by ID (not version)
+    const snapshotCheck = await client.query(
+      'SELECT id, version, env, is_active FROM pkg_snapshots WHERE id = $1',
+      [snapshotId]
+    );
+    
+    if (snapshotCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      console.log(`[POST /api/snapshots/${snapshotId}/promote] Snapshot not found by id=${snapshotId}`);
+      return res.status(404).json({ error: `Snapshot ${snapshotId} not found` });
+    }
+    
+    const snapshot = snapshotCheck.rows[0];
+    console.log(`[POST /api/snapshots/${snapshotId}/promote] Found snapshot: ${snapshot.version} (env: ${snapshot.env})`);
+    
+    // If promoting to active (implicit or explicit), deactivate other snapshots in same env
+    // Note: For now, promotion just updates artifactFormat, not is_active
+    // But if we want to make it active, we need to deactivate others first
+    // const shouldActivate = req.body.isActive === true;
+    // if (shouldActivate) {
+    //   await client.query(
+    //     'UPDATE pkg_snapshots SET is_active = false WHERE env = $1 AND is_active = true',
+    //     [snapshot.env]
+    //   );
+    // }
+    
+    // Build update query
+    const updates = [];
+    const values = [];
+    let paramIndex = 1;
+    
+    if (checksum !== undefined) {
+      updates.push(`checksum = $${paramIndex++}`);
+      values.push(checksum);
+    }
+    
+    if (sizeBytes !== undefined) {
+      updates.push(`size_bytes = $${paramIndex++}`);
+      values.push(sizeBytes);
+    }
+    
+    // Note: artifactFormat is not in DB schema yet, but we'll store it in notes or metadata for now
+    // Or we can add it to the schema later
+    if (updates.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'No fields to update (checksum or sizeBytes required)' });
+    }
+    
+    // Update snapshot by ID
+    values.push(snapshotId);
+    const updateQuery = `
+      UPDATE pkg_snapshots 
+      SET ${updates.join(', ')}
+      WHERE id = $${paramIndex}
+      RETURNING id, version, env, is_active, checksum, size_bytes, created_at, notes
+    `;
+    
+    console.log(`[POST /api/snapshots/${snapshotId}/promote] Executing update query`);
+    const result = await client.query(updateQuery, values);
+    
+    if (result.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: `Snapshot ${snapshotId} not found during update` });
+    }
+    
+    await client.query('COMMIT');
+    
+    const row = result.rows[0];
+    console.log(`[POST /api/snapshots/${snapshotId}/promote] Promotion successful`);
+    
+    res.json({
+      id: row.id,
+      version: row.version,
+      env: row.env,
+      isActive: row.is_active,
+      checksum: row.checksum,
+      sizeBytes: row.size_bytes || 0,
+      createdAt: row.created_at.toISOString(),
+      notes: row.notes || undefined,
+      artifactFormat: artifactFormat || 'wasm', // Include in response
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error(`[POST /api/snapshots/:id/promote] Error:`, error);
+    res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.patch('/api/snapshots/:id', async (req, res) => {
+  try {
+    const snapshotId = parseInt(req.params.id);
+    const { artifactFormat, checksum, sizeBytes, stage, notes } = req.body;
+    
+    console.log(`[PATCH /api/snapshots/${snapshotId}] Looking up snapshot by id=${snapshotId}`);
+    
+    // Verify snapshot exists by ID first
+    const snapshotCheck = await pool.query(
+      'SELECT id FROM pkg_snapshots WHERE id = $1',
+      [snapshotId]
+    );
+    
+    if (snapshotCheck.rows.length === 0) {
+      console.log(`[PATCH /api/snapshots/${snapshotId}] Snapshot not found by id=${snapshotId}`);
+      return res.status(404).json({ error: `Snapshot ${snapshotId} not found` });
+    }
+    
+    console.log(`[PATCH /api/snapshots/${snapshotId}] Snapshot found, updating`);
+    
+    // Build dynamic update query (only update fields that are provided)
+    const updates = [];
+    const values = [];
+    let paramIndex = 1;
+    
+    if (checksum !== undefined) {
+      updates.push(`checksum = $${paramIndex++}`);
+      values.push(checksum);
+    }
+    
+    if (sizeBytes !== undefined) {
+      updates.push(`size_bytes = $${paramIndex++}`);
+      values.push(sizeBytes);
+    }
+    
+    if (notes !== undefined) {
+      updates.push(`notes = $${paramIndex++}`);
+      values.push(notes);
+    }
+    
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+    
+    // Add snapshot ID as last parameter
+    values.push(snapshotId);
+    
+    const updateQuery = `
+      UPDATE pkg_snapshots 
+      SET ${updates.join(', ')}
+      WHERE id = $${paramIndex}
+      RETURNING id, version, env, is_active, checksum, size_bytes, created_at, notes
+    `;
+    
+    const result = await pool.query(updateQuery, values);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: `Snapshot ${snapshotId} not found during update` });
+    }
+    
+    const row = result.rows[0];
+    
+    // Return updated snapshot (including artifactFormat if provided, even though it's not stored in DB yet)
+    res.json({
+      id: row.id,
+      version: row.version,
+      env: row.env,
+      isActive: row.is_active,
+      checksum: row.checksum,
+      sizeBytes: row.size_bytes || 0,
+      createdAt: row.created_at.toISOString(),
+      notes: row.notes || undefined,
+      artifactFormat: artifactFormat || undefined, // Include in response if provided
+      stage: stage || undefined, // Include in response if provided
+    });
+  } catch (error) {
+    console.error('Error updating snapshot:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Catch-all for debugging unmatched routes
+app.use('/api/snapshots', (req, res, next) => {
+  console.log(`[UNMATCHED ROUTE] ${req.method} ${req.path}`);
+  next();
+});
+
+// Catch-all for all unmatched API routes (for debugging)
+app.use('/api/*', (req, res) => {
+  console.log(`[UNMATCHED API ROUTE] ${req.method} ${req.originalUrl}`);
+  res.status(404).json({ 
+    error: `Route not found: ${req.method} ${req.originalUrl}`,
+    hint: 'Make sure the server has been restarted after adding new routes'
+  });
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 Database proxy server running on http://localhost:${PORT}`);
+  console.log(`📋 Registered routes:`);
+  console.log(`   GET    /api/snapshots`);
+  console.log(`   GET    /api/snapshots/:id`);
+  console.log(`   POST   /api/snapshots`);
+  console.log(`   POST   /api/snapshots/:id/promote`);
+  console.log(`   POST   /api/snapshots/:sourceId/clone`);
+  console.log(`   PATCH  /api/snapshots/:id`);
+  console.log(`   GET    /api/deployments`);
+  console.log(`   GET    /api/deployments/active`);
+  console.log(`   POST   /api/deployments`);
   const dbName = process.env.POSTGRES_DB || 'seedcore';
   console.log(`📊 Connected to PostgreSQL at ${process.env.POSTGRES_HOST || 'localhost'}:${process.env.POSTGRES_PORT || '5432'}/${dbName}`);
 });

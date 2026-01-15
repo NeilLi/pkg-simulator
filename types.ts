@@ -47,6 +47,7 @@ export interface Snapshot {
   createdAt: string;
   notes?: string;
   parentId?: number;
+  artifactFormat?: 'native' | 'wasm';
 }
 
 export interface SubtaskType {
@@ -65,6 +66,10 @@ export interface Rule {
   conditions: Condition[];
   emissions: Emission[];
   disabled: boolean;
+  ruleSource?: string | null;
+  compiledRule?: string | null;
+  ruleHash?: string | null;
+  metadata?: any | null;
 }
 
 export interface Condition {
@@ -107,14 +112,23 @@ export interface UnifiedMemoryItem {
   metadata: any;
 }
 
+export type DeploymentTarget =
+  | 'router'
+  | 'edge:robot'
+  | 'edge:camera'
+  | 'edge:door'
+  | 'cloud:simulation';
+
 export interface Deployment {
   id: number;
   snapshotId: number;
-  target: string; // router, edge:door, edge:robot
+  target: DeploymentTarget;
   region: string;
   percent: number;
   isActive: boolean;
   activatedAt: string;
+  deploymentKey?: string; // For explicit idempotency (default: 'default')
+  validationRunId?: number; // Optional reference to validation run
 }
 
 export interface ValidationRun {

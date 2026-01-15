@@ -30,17 +30,28 @@ export const buildSnapshotFromProposal = (
 ): { snapshot: Snapshot; newRules: Rule[] } => {
   const newSnapshotId = Math.floor(Math.random() * 10000) + 100;
   
+  // Generate a valid 64-character hex checksum for native format (placeholder - will be replaced on promotion)
+  const timestamp = Date.now();
+  const checksumBase = `${proposal.newVersion}-native-${timestamp}`;
+  // Convert to hex and pad/truncate to exactly 64 characters
+  let nativeChecksum = Array.from(checksumBase)
+    .map(c => c.charCodeAt(0).toString(16))
+    .join('')
+    .padEnd(64, '0')
+    .substring(0, 64);
+  
   const snapshot: Snapshot = {
     id: newSnapshotId,
     version: proposal.newVersion,
     env: PkgEnv.PROD, // Default env
     stage: 'DRAFT',
     isActive: false,
-    checksum: `sha-${Date.now()}`,
+    checksum: nativeChecksum,
     sizeBytes: 0, // calc later
     createdAt: new Date().toISOString(),
     notes: `AI Evolution: ${proposal.reason}`,
-    parentId: proposal.baseSnapshotId
+    parentId: proposal.baseSnapshotId,
+    artifactFormat: 'native' // New drafts are created in native format
   };
 
   let newRules = baseRules.filter(r => r.snapshotId === proposal.baseSnapshotId).map(r => ({...r, snapshotId: newSnapshotId}));
@@ -94,10 +105,55 @@ export const runValidationAgent = async (snapshotId: number, rules: Rule[]): Pro
 };
 
 // --- Deployment Agent ---
+// Monotonic canary step progression (strictly increasing, never returns same value)
+const CANARY_STEPS = [1, 5, 10, 25, 50, 100];
+
 export const calculateCanaryStep = (currentPercent: number): number => {
-  if (currentPercent === 0) return 5;
-  if (currentPercent === 5) return 25;
-  if (currentPercent === 25) return 50;
-  if (currentPercent === 50) return 100;
-  return 100;
+  // Find the next step that is strictly greater than current
+  const idx = CANARY_STEPS.findIndex(s => s > currentPercent);
+  // If no step is greater (current >= 100), return 100
+  return idx === -1 ? 100 : CANARY_STEPS[idx];
+};
+
+// --- Snapshot Promotion Service ---
+import { promoteSnapshot } from './snapshotService';
+
+/**
+ * Generate SHA256 hash using Web Crypto API (browser-compatible)
+ */
+async function sha256(message: string): Promise<string> {
+  const msgBuffer = new TextEncoder().encode(message);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Promote a native snapshot to WASM format
+ * Simulates the compilation process: compression + checksum update
+ */
+export const promoteToWasm = async (
+  snapshot: Snapshot,
+  rules: Rule[]
+): Promise<Snapshot> => {
+  // Simulate WASM compilation: compress rules and generate new checksum
+  const rulesJson = JSON.stringify(rules);
+  const nativeSize = new Blob([rulesJson]).size; // Browser-compatible size calculation
+  
+  // Simulate compression (WASM is typically 60-80% of native size)
+  const compressionRatio = 0.7; // 30% compression
+  const wasmSize = Math.floor(nativeSize * compressionRatio);
+  
+  // Generate new checksum from compressed content (simulate SHA256)
+  const checksumInput = `${snapshot.version}-wasm-${wasmSize}-${Date.now()}`;
+  const checksum = await sha256(checksumInput);
+  
+  // Promote snapshot to WASM via dedicated promotion endpoint (ID-based lookup)
+  const updated = await promoteSnapshot(snapshot.id, {
+    checksum,
+    sizeBytes: wasmSize,
+    artifactFormat: 'wasm'
+  });
+  
+  return updated;
 };

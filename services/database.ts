@@ -71,6 +71,9 @@ export async function fetchSnapshots(): Promise<Snapshot[]> {
     sizeBytes: row.sizeBytes || 0,
     createdAt: row.createdAt,
     notes: row.notes || undefined,
+    artifactFormat: (row.artifactFormat === 'native' || row.artifactFormat === 'wasm') 
+      ? row.artifactFormat 
+      : undefined,
   }));
 }
 
@@ -119,8 +122,8 @@ export async function fetchRules(): Promise<Rule[]> {
 }
 
 // Fetch all deployments
-export async function fetchDeployments(): Promise<Deployment[]> {
-  const response = await fetch(`${API_BASE_URL}/api/deployments`);
+export async function fetchDeployments(activeOnly: boolean = false): Promise<Deployment[]> {
+  const response = await fetch(`${API_BASE_URL}/api/deployments?active_only=${activeOnly}`);
   if (!response.ok) {
     throw new Error(`Failed to fetch deployments: ${response.statusText}`);
   }

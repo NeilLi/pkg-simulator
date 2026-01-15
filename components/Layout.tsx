@@ -1,21 +1,39 @@
 import React from 'react';
 import { Activity, Database, GitBranch, Play, LayoutDashboard, BrainCircuit, Cpu } from 'lucide-react';
+import { AppPage, FEATURE_SEQUENCE, PAGE_METADATA } from '../appPages';
 
 interface LayoutProps {
   children: React.ReactNode;
-  activePage: string;
-  onNavigate: (page: string) => void;
+  activePage: AppPage;
+  onNavigate: (page: AppPage) => void;
 }
 
 export const Layout: React.FC<LayoutProps> = ({ children, activePage, onNavigate }) => {
-  const navItems = [
-    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { id: 'control-plane', label: 'Control Plane', icon: Cpu },
-    { id: 'factory', label: 'Policy Factory', icon: GitBranch },
-    { id: 'simulator', label: 'Simulator', icon: Play },
-    { id: 'knowledge', label: 'Knowledge Graph', icon: Database },
-    { id: 'memory', label: 'Unified Memory', icon: BrainCircuit },
-  ];
+  // Map icons to pages
+  const pageIcons: Record<AppPage, typeof LayoutDashboard> = {
+    [AppPage.DASHBOARD]: LayoutDashboard,
+    [AppPage.CONTROL_PLANE]: Cpu,
+    [AppPage.POLICY_STUDIO]: GitBranch,
+    [AppPage.POLICY_FACTORY]: GitBranch,
+    [AppPage.SIMULATOR]: Play,
+    [AppPage.KNOWLEDGE]: Database,
+    [AppPage.MEMORY]: BrainCircuit,
+    [AppPage.INITIALIZATION]: Activity,
+  };
+
+  // Build navigation items from feature sequence
+  // This ensures navigation follows the system lifecycle order
+  const navItems = FEATURE_SEQUENCE.map((page) => {
+    const metadata = PAGE_METADATA[page];
+    const Icon = pageIcons[page];
+    
+    return {
+      id: page,
+      label: metadata?.label || page,
+      icon: Icon,
+      description: metadata?.description,
+    };
+  });
 
   return (
     <div className="flex h-screen bg-gray-50 overflow-hidden">
@@ -38,12 +56,13 @@ export const Layout: React.FC<LayoutProps> = ({ children, activePage, onNavigate
             return (
               <button
                 key={item.id}
-                onClick={() => onNavigate(item.id)}
+                onClick={() => onNavigate(item.id as AppPage)}
                 className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors duration-200 ${
                   isActive 
                     ? 'bg-indigo-600 text-white shadow-lg' 
                     : 'text-slate-400 hover:bg-slate-800 hover:text-white'
                 }`}
+                title={item.description}
               >
                 <Icon size={20} />
                 <span className="font-medium">{item.label}</span>
@@ -69,7 +88,9 @@ export const Layout: React.FC<LayoutProps> = ({ children, activePage, onNavigate
       <main className="flex-1 overflow-auto relative">
         <header className="bg-white shadow-sm sticky top-0 z-10">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
-            <h2 className="text-xl font-semibold text-gray-800 capitalize">{activePage.replace('-', ' ')}</h2>
+            <h2 className="text-xl font-semibold text-gray-800">
+              {PAGE_METADATA[activePage]?.label || activePage.replace('-', ' ')}
+            </h2>
             <div className="flex items-center space-x-4">
                <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
                  System Operational

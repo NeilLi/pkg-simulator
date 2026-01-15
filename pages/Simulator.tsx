@@ -14,6 +14,7 @@ import {
 
 import { getRules, getFacts, getUnifiedMemory, getSnapshots } from '../mockData';
 import { hydrateContext, HydratedContext, runSimulation } from '../services/pkgEngine';
+import { startValidationRun, finishValidationRun } from '../services/validationService';
 import {
   SimulationResult,
   Snapshot,
@@ -295,7 +296,7 @@ export const Simulator: React.FC = () => {
     setHydrationPreview(ctx.hydrated.hydrationLogs || []);
   };
 
-  const handleRun = () => {
+  const handleRun = async () => {
     const ctx = computeContext();
     if (ctx.ok === false) {
       setParseErrors(ctx.errors);
@@ -307,9 +308,59 @@ export const Simulator: React.FC = () => {
     setParseErrors([]);
     setHydrationPreview(hydrated.hydrationLogs || []);
 
+    // Start validation run persistence
+    let validationRunId: number | null = null;
+    const startTime = performance.now();
+    try {
+      if (snapshotId) {
+        const runStart = await startValidationRun(snapshotId);
+        validationRunId = runStart.id;
+      }
+    } catch (error) {
+      console.error('Failed to start validation run:', error);
+      // Continue with simulation even if persistence fails
+    }
+
+    // Run simulation
+    const hydrationTime = performance.now() - startTime;
+    const executionStartTime = performance.now();
     const results = runSimulation(snapshotRules, hydrated);
+    const executionTime = performance.now() - executionStartTime;
+    const totalTime = performance.now() - startTime;
+
     const triggered = results.filter(r => r.success);
+    const passed = results.filter(r => r.success).length;
+    const failed = results.filter(r => !r.success).length;
     const emissions = triggered.reduce((acc, r) => acc + (r.emissions?.length || 0), 0);
+
+    // Collect all emissions for report
+    const allEmissions = triggered.flatMap(r => 
+      r.emissions.map(e => ({
+        rule: r.ruleName,
+        subtask: e.subtaskName || e.subtaskTypeId,
+        params: e.params,
+      }))
+    );
+
+    // Collect all logs
+    const allLogs = [
+      ...(hydrated.hydrationLogs || []),
+      ...results.flatMap(r => r.logs || []),
+    ];
+
+    // Calculate simulation score (simple: passed / total)
+    const simulationScore = results.length > 0 ? passed / results.length : 0;
+
+    // Detect conflicts (rules that both triggered but might conflict)
+    const conflicts: string[] = [];
+    if (triggered.length > 1) {
+      // Simple conflict detection: if multiple rules trigger, note potential conflicts
+      const triggeredRuleNames = triggered.map(r => r.ruleName);
+      if (triggeredRuleNames.length > 1) {
+        // This is a simplified conflict detection - in real system, you'd check rule priorities and emissions
+        conflicts.push(`Multiple rules triggered: ${triggeredRuleNames.join(', ')}`);
+      }
+    }
 
     const record: RunRecord = {
       id: nowId(),
@@ -331,6 +382,36 @@ export const Simulator: React.FC = () => {
 
     setRunHistory(prev => [record, ...prev]);
     setActiveRunId(record.id);
+
+    // Finish validation run persistence
+    if (validationRunId !== null) {
+      try {
+        await finishValidationRun({
+          id: validationRunId,
+          success: failed === 0,
+          report: {
+            type: 'simulation',
+            engine: 'wasm', // Default to wasm for now
+            rulesEvaluated: results.length,
+            rulesTriggered: triggered.length,
+            passed,
+            failed,
+            conflicts,
+            simulationScore,
+            timingMs: {
+              total: Math.round(totalTime),
+              hydration: Math.round(hydrationTime),
+              execution: Math.round(executionTime),
+            },
+            emissions: allEmissions,
+            logs: allLogs,
+          },
+        });
+      } catch (error) {
+        console.error('Failed to finish validation run:', error);
+        // Don't block UI - simulation already completed
+      }
+    }
   };
 
   const handleClearRuns = () => {

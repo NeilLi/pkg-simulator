@@ -654,14 +654,24 @@ app.post('/api/deployments', async (req, res) => {
   }
 });
 
-// Get validation runs
+// Get validation runs (with optional snapshotId filter)
 app.get('/api/validation-runs', async (req, res) => {
   try {
-    const result = await pool.query(`
+    const snapshotId = req.query.snapshotId ? parseInt(req.query.snapshotId) : null;
+    let query = `
       SELECT id, snapshot_id, started_at, finished_at, success, report
       FROM pkg_validation_runs
-      ORDER BY started_at DESC
-    `);
+    `;
+    const params = [];
+    
+    if (snapshotId) {
+      query += ` WHERE snapshot_id = $1`;
+      params.push(snapshotId);
+    }
+    
+    query += ` ORDER BY started_at DESC LIMIT 50`;
+    
+    const result = await pool.query(query, params);
     res.json(result.rows.map(row => ({
       id: row.id,
       snapshotId: row.snapshot_id,
@@ -672,6 +682,86 @@ app.get('/api/validation-runs', async (req, res) => {
     })));
   } catch (error) {
     console.error('Error fetching validation runs:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Start a validation run
+app.post('/api/validation-runs/start', async (req, res) => {
+  try {
+    const { snapshotId } = req.body;
+    
+    if (!snapshotId || snapshotId < 1) {
+      return res.status(400).json({ error: 'snapshotId is required and must be positive' });
+    }
+    
+    const result = await pool.query(`
+      INSERT INTO pkg_validation_runs (snapshot_id)
+      VALUES ($1)
+      RETURNING id, started_at
+    `, [snapshotId]);
+    
+    const row = result.rows[0];
+    res.json({
+      id: row.id,
+      startedAt: row.started_at.toISOString(),
+    });
+  } catch (error) {
+    console.error('Error starting validation run:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Finish a validation run
+app.post('/api/validation-runs/finish', async (req, res) => {
+  try {
+    const { id, success, report } = req.body;
+    
+    if (!id || id < 1) {
+      return res.status(400).json({ error: 'id is required and must be positive' });
+    }
+    
+    if (success === undefined || success === null) {
+      return res.status(400).json({ error: 'success is required (boolean)' });
+    }
+    
+    // Validate report is JSON-serializable if provided
+    let reportJson = null;
+    if (report !== undefined) {
+      try {
+        reportJson = typeof report === 'string' ? JSON.parse(report) : report;
+        // Ensure it's valid JSON by stringifying
+        JSON.stringify(reportJson);
+      } catch (e) {
+        return res.status(400).json({ error: 'report must be valid JSON' });
+      }
+    }
+    
+    const result = await pool.query(`
+      UPDATE pkg_validation_runs
+      SET
+        finished_at = now(),
+        success = $1,
+        report = $2
+      WHERE id = $3
+      RETURNING id, snapshot_id, started_at, finished_at, success, report
+    `, [success, reportJson, id]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: `Validation run ${id} not found` });
+    }
+    
+    const row = result.rows[0];
+    res.json({
+      id: row.id,
+      snapshotId: row.snapshot_id,
+      startedAt: row.started_at.toISOString(),
+      finishedAt: row.finished_at?.toISOString(),
+      success: row.success,
+      report: row.report || undefined,
+    });
+  } catch (error) {
+    console.error('Error finishing validation run:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1401,6 +1491,9 @@ app.listen(PORT, () => {
   console.log(`   GET    /api/deployments`);
   console.log(`   GET    /api/deployments/active`);
   console.log(`   POST   /api/deployments`);
+  console.log(`   GET    /api/validation-runs`);
+  console.log(`   POST   /api/validation-runs/start`);
+  console.log(`   POST   /api/validation-runs/finish`);
   const dbName = process.env.POSTGRES_DB || 'seedcore';
   console.log(`📊 Connected to PostgreSQL at ${process.env.POSTGRES_HOST || 'localhost'}:${process.env.POSTGRES_PORT || '5432'}/${dbName}`);
 });

@@ -130,9 +130,12 @@ export async function fetchDeployments(activeOnly: boolean = false): Promise<Dep
   return await response.json();
 }
 
-// Fetch all validation runs
-export async function fetchValidationRuns(): Promise<ValidationRun[]> {
-  const response = await fetch(`${API_BASE_URL}/api/validation-runs`);
+// Fetch all validation runs (optionally filtered by snapshotId)
+export async function fetchValidationRuns(snapshotId?: number): Promise<ValidationRun[]> {
+  const url = snapshotId
+    ? `${API_BASE_URL}/api/validation-runs?snapshotId=${snapshotId}`
+    : `${API_BASE_URL}/api/validation-runs`;
+  const response = await fetch(url);
   if (!response.ok) {
     throw new Error(`Failed to fetch validation runs: ${response.statusText}`);
   }

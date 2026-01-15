@@ -138,10 +138,25 @@ export interface ValidationRun {
   finishedAt?: string;
   success?: boolean;
   report?: {
-    passed: number;
-    failed: number;
-    conflicts: string[];
-    simulationScore: number;
+    type?: 'simulation' | 'validation' | 'canary' | 'regression';
+    engine?: 'wasm' | 'native';
+    rulesEvaluated?: number;
+    rulesTriggered?: number;
+    passed?: number;
+    failed?: number;
+    conflicts?: string[];
+    simulationScore?: number;
+    timingMs?: {
+      total: number;
+      hydration?: number;
+      execution?: number;
+    };
+    emissions?: Array<{
+      rule: string;
+      subtask: string;
+      params?: any;
+    }>;
+    logs?: string[];
   };
 }
 

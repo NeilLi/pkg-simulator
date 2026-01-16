@@ -43,6 +43,14 @@ export const Dashboard: React.FC = () => {
   const loadData = async (env: PkgEnv) => {
     try {
       const snaps = await listSnapshots({ env, includeInactive: true, limit: 200 });
+      
+      // Guard against null/undefined responses
+      if (!snaps || !Array.isArray(snaps)) {
+        console.warn('listSnapshots returned invalid data:', snaps);
+        setSnapshots([]);
+      } else {
+        setSnapshots(snaps);
+      }
 
       const [ruls, fcts, deps, vals] = await Promise.all([
         getRules(),
@@ -51,13 +59,18 @@ export const Dashboard: React.FC = () => {
         getValidationRuns(),
       ]);
 
-      setSnapshots(snaps);
-      setRules(ruls);
-      setFacts(fcts);
-      setDeployments(deps);
-      setValidations(vals);
+      setRules(ruls || []);
+      setFacts(fcts || []);
+      setDeployments(deps || []);
+      setValidations(vals || []);
     } catch (error) {
       console.error('Error loading dashboard data:', error);
+      // Set empty arrays on error to prevent null access
+      setSnapshots([]);
+      setRules([]);
+      setFacts([]);
+      setDeployments([]);
+      setValidations([]);
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -180,20 +193,26 @@ export const Dashboard: React.FC = () => {
         {/* Main Chart */}
         <div className="lg:col-span-2 bg-white shadow rounded-lg p-6">
           <h3 className="text-lg leading-6 font-medium text-gray-900 mb-4">Policy Evaluations (24h)</h3>
-          <div className="h-72">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="name" axisLine={false} tickLine={false} />
-                <YAxis axisLine={false} tickLine={false} />
-                <Tooltip 
-                  contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }}
-                  cursor={{ fill: '#f3f4f6' }}
-                />
-                <Bar dataKey="evals" fill="#6366f1" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
+          {chartData && chartData.length > 0 ? (
+            <div className="h-72 min-h-[288px] w-full">
+              <ResponsiveContainer width="100%" height={288}>
+                <BarChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                  <XAxis dataKey="name" axisLine={false} tickLine={false} />
+                  <YAxis axisLine={false} tickLine={false} />
+                  <Tooltip 
+                    contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }}
+                    cursor={{ fill: '#f3f4f6' }}
+                  />
+                  <Bar dataKey="evals" fill="#6366f1" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          ) : (
+            <div className="h-72 min-h-[288px] flex items-center justify-center text-gray-500">
+              No chart data available
+            </div>
+          )}
         </div>
 
         {/* Deployments & Validations */}

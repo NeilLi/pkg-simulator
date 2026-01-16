@@ -7,8 +7,11 @@ if (!rootElement) {
   throw new Error("Could not find root element to mount to");
 }
 
-const root = ReactDOM.createRoot(rootElement);
-root.render(
+// Prevent duplicate root creation during HMR
+if (!(window as any).__reactRoot) {
+  (window as any).__reactRoot = ReactDOM.createRoot(rootElement);
+}
+(window as any).__reactRoot.render(
   <React.StrictMode>
     <App />
   </React.StrictMode>

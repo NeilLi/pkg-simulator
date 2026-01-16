@@ -107,12 +107,41 @@ async function requestJson<T>(
 
   const timeout = withTimeout(opts.timeoutMs);
   try {
-    const res = await fetch(url, {
-      method,
-      headers,
-      body: hasBody ? JSON.stringify(opts.body) : undefined,
-      signal: timeout.signal,
-    });
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method,
+        headers,
+        body: hasBody ? JSON.stringify(opts.body) : undefined,
+        signal: timeout.signal,
+      });
+    } catch (fetchError) {
+      // Handle abort errors (timeout) - check this first
+      if (fetchError instanceof Error && fetchError.name === 'AbortError') {
+        throw new ApiError(
+          `Request timeout after ${opts.timeoutMs ?? 'default'}ms for ${path}`,
+          { url },
+        );
+      }
+      // Handle network errors (server down, CORS, connection refused, etc.)
+      // "Failed to fetch" is a common TypeError thrown by fetch
+      if (fetchError instanceof TypeError) {
+        const message = fetchError.message.toLowerCase();
+        if (message.includes('fetch') || message.includes('network') || message.includes('failed')) {
+          // Check if it's a CORS error specifically
+          const isCorsError = message.includes('cors') || 
+                              (typeof window !== 'undefined' && window.location.origin !== 'http://localhost:3000');
+          
+          const errorMsg = isCorsError
+            ? `CORS error: The server at ${url} is not allowing requests from ${typeof window !== 'undefined' ? window.location.origin : 'your origin'}. Check db-proxy CORS configuration.`
+            : `Network error: Unable to reach server at ${url}. Is the db-proxy server running?`;
+          
+          throw new ApiError(errorMsg, { url, details: fetchError.message });
+        }
+      }
+      // Re-throw other errors (including other TypeErrors that aren't network-related)
+      throw fetchError;
+    }
 
     const contentType = res.headers.get('content-type');
 

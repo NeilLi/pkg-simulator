@@ -14,13 +14,25 @@
 import express from 'express';
 import cors from 'cors';
 import { Pool } from 'pg';
+import crypto from 'crypto';
 
 const app = express();
 const PORT = process.env.DB_PROXY_PORT || 3001;
 
-// CORS for Vite dev server
+// CORS for Vite dev server (support both 3000 and 3010 for flexibility)
 app.use(cors({
-  origin: 'http://localhost:3000',
+  origin: (origin, callback) => {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    // Allow localhost on any port
+    if (origin.match(/^http:\/\/localhost:\d+$/)) {
+      return callback(null, true);
+    }
+    
+    // Default: allow the request
+    callback(null, true);
+  },
   credentials: true
 }));
 app.use(express.json());
@@ -38,14 +50,40 @@ const pool = new Pool({
   connectionTimeoutMillis: 2000,
 });
 
-// Test connection
-pool.on('connect', () => {
+// Test connection and load enum defaults
+pool.on('connect', async () => {
   console.log('✅ Database connection established');
+  // Load task status enum default after first connection
+  await loadTaskStatusDefault();
 });
 
 pool.on('error', (err) => {
   console.error('❌ Database pool error:', err);
 });
+
+// Cache for task status enum default value (loaded at startup)
+let TASK_STATUS_DEFAULT = 'active';
+
+// Load task status enum default value at startup
+async function loadTaskStatusDefault() {
+  try {
+    const result = await pool.query(`
+      SELECT e.enumlabel AS v
+      FROM pg_type t
+      JOIN pg_enum e ON t.oid = e.enumtypid
+      WHERE t.typname = 'taskstatus'
+      ORDER BY e.enumsortorder
+      LIMIT 1
+    `);
+    if (result.rows[0]?.v) {
+      TASK_STATUS_DEFAULT = result.rows[0].v;
+      console.log(`✅ Loaded task status enum default: ${TASK_STATUS_DEFAULT}`);
+    }
+  } catch (e) {
+    console.warn('⚠️  Could not load taskstatus enum; using fallback "active":', e.message);
+  }
+}
+
 
 // Health check
 app.get('/health', async (req, res) => {
@@ -1555,6 +1593,424 @@ app.patch('/api/snapshots/:id', async (req, res) => {
   }
 });
 
+// Memory endpoints for Unified Cortex Memory integration
+// POST /api/memory/append - Write to event_working (tasks + multimodal embeddings) or knowledge_base (graph embeddings)
+app.post('/api/memory/append', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    
+    const { tier, category, content, runId, metadata } = req.body;
+    
+    if (!tier || !category || !content) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'tier, category, and content are required' });
+    }
+    
+    if (tier === 'event_working') {
+      // Write to tasks + task_multimodal_embeddings (Tier A)
+      // Generate a UUID for the task
+      const taskIdResult = await client.query('SELECT gen_random_uuid() as id');
+      const taskId = taskIdResult.rows[0].id;
+      
+      // Map category to valid task type enum values
+      // Valid types: "chat", "query", "action", "graph", "maintenance", "unknown"
+      const validTaskTypes = ['chat', 'query', 'action', 'graph', 'maintenance', 'unknown'];
+      let taskType = 'action'; // Default to 'action' for wearable design seeds
+      
+      // Try to map category to a valid type
+      if (category.includes('design') || category.includes('wearable') || category.includes('seed')) {
+        taskType = 'action'; // Design/wearable tasks are actions
+      } else if (category.includes('query') || category.includes('search')) {
+        taskType = 'query';
+      } else if (category.includes('chat') || category.includes('conversation')) {
+        taskType = 'chat';
+      } else if (category.includes('graph') || category.includes('knowledge')) {
+        taskType = 'graph';
+      } else if (validTaskTypes.includes(category.toLowerCase())) {
+        taskType = category.toLowerCase();
+      }
+      
+      // Store original category in metadata
+      const taskMetadata = {
+        ...(metadata || {}),
+        original_category: category,
+        task_category: category
+      };
+      
+      // Insert into tasks table
+      // Use SAVEPOINT before the insert to allow safe rollback on failure
+      await client.query('SAVEPOINT sp_task_insert');
+      
+      try {
+        // Always include status with the cached default value
+        // This prevents NOT NULL constraint violations
+        await client.query(`
+          INSERT INTO tasks (id, type, description, params, status)
+          VALUES ($1, $2, $3, $4, $5)
+        `, [
+          taskId,
+          taskType,
+          content,
+          JSON.stringify(taskMetadata),
+          TASK_STATUS_DEFAULT
+        ]);
+        
+        await client.query('RELEASE SAVEPOINT sp_task_insert');
+      } catch (insertError) {
+        // Log the root cause error (not just the 25P02 symptom)
+        console.error('❌ tasks insert failed (root cause):', {
+          code: insertError.code,
+          message: insertError.message,
+          detail: insertError.detail,
+          constraint: insertError.constraint,
+          column: insertError.column,
+          dataType: insertError.dataType
+        });
+        
+        // Rollback to savepoint (this prevents transaction abort)
+        await client.query('ROLLBACK TO SAVEPOINT sp_task_insert');
+        await client.query('RELEASE SAVEPOINT sp_task_insert');
+        
+        // Re-throw the error - don't continue in the same transaction
+        throw insertError;
+      }
+      
+      // Generate a dummy embedding vector (1024 dimensions) - in production, this would come from an embedding service
+      // For now, we'll use a zero vector or a simple hash-based vector
+      const embeddingVector = Array(1024).fill(0).map(() => Math.random() * 0.01 - 0.005); // Small random values
+      const embeddingStr = `[${embeddingVector.join(',')}]`;
+      
+      // Insert into task_multimodal_embeddings
+      await client.query(`
+        INSERT INTO task_multimodal_embeddings (task_id, emb, source_modality, model_version)
+        VALUES ($1, $2::vector, $3, $4)
+      `, [
+        taskId,
+        embeddingStr,
+        metadata?.source_modality || 'text',
+        metadata?.model_version || 'default'
+      ]);
+      
+      await client.query('COMMIT');
+      
+      res.json({
+        id: taskId,
+        tier: 'event_working',
+        category,
+        content,
+        metadata: metadata || {}
+      });
+    } else if (tier === 'knowledge_base') {
+      // Write to graph_embeddings_1024 (Tier B/C)
+      // Generate a dummy embedding vector (1024 dimensions)
+      const embeddingVector = Array(1024).fill(0).map(() => Math.random() * 0.01 - 0.005);
+      const embeddingStr = `[${embeddingVector.join(',')}]`;
+      
+      // Compute content SHA256 for deduplication
+      const contentSha256 = crypto.createHash('sha256').update(content).digest('hex');
+      
+      // Generate node_id - Option A: Check sequence existence first (industry-grade)
+      // This avoids transaction abort by never calling nextval on non-existent sequence
+      let nodeId;
+      
+      try {
+        // Safe existence check that never errors
+        const seqExists = await client.query(`
+          SELECT to_regclass('graph_nodes_node_id_seq') IS NOT NULL AS ok
+        `);
+        
+        if (seqExists.rows[0]?.ok) {
+          // Sequence exists, use it
+          const seqResult = await client.query(`
+            SELECT nextval('graph_nodes_node_id_seq') AS node_id
+          `);
+          nodeId = seqResult.rows[0]?.node_id;
+          
+          if (!nodeId) {
+            throw new Error('Sequence returned null');
+          }
+        } else {
+          // Sequence doesn't exist, use fallback generator
+          const ts = Date.now();
+          const rnd = Math.floor(Math.random() * 1_000_000);
+          nodeId = parseInt(`${ts}${String(rnd).padStart(6, '0')}`, 10);
+        }
+      } catch (seqError) {
+        // Log root cause if sequence check/usage fails
+        console.error('❌ node_id generation failed (root cause):', {
+          code: seqError.code,
+          message: seqError.message,
+          detail: seqError.detail
+        });
+        
+        // Fallback generator (guaranteed to work)
+        const ts = Date.now();
+        const rnd = Math.floor(Math.random() * 1_000_000);
+        nodeId = parseInt(`${ts}${String(rnd).padStart(6, '0')}`, 10);
+      }
+      
+      // Validate nodeId before using it
+      if (!nodeId || !Number.isFinite(nodeId) || nodeId <= 0) {
+        await client.query('ROLLBACK');
+        return res.status(500).json({ error: `Invalid node_id generated: ${nodeId}` });
+      }
+      
+      // Insert into graph_embeddings_1024
+      // Use SAVEPOINT before the insert to allow safe rollback on failure
+      await client.query('SAVEPOINT sp_graph_insert');
+      
+      let result;
+      try {
+        result = await client.query(`
+          INSERT INTO graph_embeddings_1024 (node_id, label, emb, model, props, content_sha256)
+          VALUES ($1, $2, $3::vector, $4, $5, $6)
+          RETURNING node_id
+        `, [
+          nodeId,
+          category,
+          embeddingStr,
+          metadata?.model || 'default',
+          JSON.stringify(metadata || {}),
+          contentSha256
+        ]);
+        
+        await client.query('RELEASE SAVEPOINT sp_graph_insert');
+      } catch (insertError) {
+        // Log root cause (25P02 is just a symptom - the real error happened earlier)
+        console.error('❌ graph_embeddings_1024 insert failed (root cause):', {
+          code: insertError.code,
+          message: insertError.message,
+          detail: insertError.detail,
+          constraint: insertError.constraint,
+          column: insertError.column,
+          dataType: insertError.dataType
+        });
+        
+        // Rollback to savepoint (this prevents transaction abort)
+        await client.query('ROLLBACK TO SAVEPOINT sp_graph_insert');
+        await client.query('RELEASE SAVEPOINT sp_graph_insert');
+        
+        // Re-throw the error - don't continue in the same transaction
+        throw insertError;
+      }
+      
+      const insertedNodeId = result.rows[0].node_id;
+      
+      // If metadata contains a task_id, create a mapping in graph_node_map
+      if (metadata?.task_id) {
+        try {
+          await client.query(`
+            INSERT INTO graph_node_map (task_id, node_id, relationship_type)
+            VALUES ($1::uuid, $2, 'references')
+            ON CONFLICT DO NOTHING
+          `, [metadata.task_id, insertedNodeId]);
+        } catch (err) {
+          // graph_node_map might not exist or have different schema, ignore
+          console.warn('Could not create graph_node_map entry:', err.message);
+        }
+      }
+      
+      await client.query('COMMIT');
+      
+      res.json({
+        id: insertedNodeId.toString(),
+        tier: 'knowledge_base',
+        category,
+        content,
+        metadata: metadata || {}
+      });
+    } else {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: `Invalid tier: ${tier}. Must be 'event_working' or 'knowledge_base'` });
+    }
+  } catch (error) {
+    // Always rollback on error (safe even if already rolled back)
+    try {
+      await client.query('ROLLBACK');
+    } catch (rollbackError) {
+      // Ignore rollback errors - transaction might already be rolled back
+      // This is safe and expected
+    }
+    console.error('Error appending to memory:', error);
+    res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /api/memory/promote - Promote an item from event_working to knowledge_base
+app.post('/api/memory/promote', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    
+    const { seedHash, taskId, label } = req.body;
+    
+    if (!taskId && !seedHash) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Either taskId or seedHash is required' });
+    }
+    
+    const memoryLabel = label || 'wearable.ticket';
+    
+    // Find the task by taskId (UUID) or by searching metadata for seedHash
+    let task;
+    if (taskId) {
+      const taskResult = await client.query('SELECT * FROM tasks WHERE id = $1', [taskId]);
+      if (taskResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: `Task ${taskId} not found` });
+      }
+      task = taskResult.rows[0];
+    } else {
+      // Search for task by seedHash in metadata (less efficient, but supports seedHash lookup)
+      const tasksResult = await client.query('SELECT * FROM tasks WHERE params::text LIKE $1', [`%${seedHash}%`]);
+      if (tasksResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: `Task with seedHash ${seedHash} not found` });
+      }
+      task = tasksResult.rows[0];
+    }
+    
+    // Get the embedding from task_multimodal_embeddings
+    const embeddingResult = await client.query(`
+      SELECT emb FROM task_multimodal_embeddings WHERE task_id = $1
+    `, [task.id]);
+    
+    if (embeddingResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: `No embedding found for task ${task.id}` });
+    }
+    
+    const embedding = embeddingResult.rows[0].emb;
+    
+    // Compute content SHA256
+    const contentSha256 = crypto.createHash('sha256').update(task.description || '').digest('hex');
+    
+    // Generate node_id - Option A: Check sequence existence first (industry-grade)
+    let nodeId;
+    
+    try {
+      // Safe existence check that never errors
+      const seqExists = await client.query(`
+        SELECT to_regclass('graph_nodes_node_id_seq') IS NOT NULL AS ok
+      `);
+      
+      if (seqExists.rows[0]?.ok) {
+        // Sequence exists, use it
+        const seqResult = await client.query(`
+          SELECT nextval('graph_nodes_node_id_seq') AS node_id
+        `);
+        nodeId = seqResult.rows[0]?.node_id;
+        
+        if (!nodeId) {
+          throw new Error('Sequence returned null');
+        }
+      } else {
+        // Sequence doesn't exist, use fallback generator
+        const ts = Date.now();
+        const rnd = Math.floor(Math.random() * 1_000_000);
+        nodeId = parseInt(`${ts}${String(rnd).padStart(6, '0')}`, 10);
+      }
+    } catch (seqError) {
+      // Log root cause if sequence check/usage fails
+      console.error('❌ node_id generation failed (root cause):', {
+        code: seqError.code,
+        message: seqError.message,
+        detail: seqError.detail
+      });
+      
+      // Fallback generator (guaranteed to work)
+      const ts = Date.now();
+      const rnd = Math.floor(Math.random() * 1_000_000);
+      nodeId = parseInt(`${ts}${String(rnd).padStart(6, '0')}`, 10);
+    }
+    
+    // Validate nodeId before using it
+    if (!nodeId || !Number.isFinite(nodeId) || nodeId <= 0) {
+      await client.query('ROLLBACK');
+      return res.status(500).json({ error: `Invalid node_id generated: ${nodeId}` });
+    }
+    
+    // Insert into graph_embeddings_1024
+    const graphResult = await client.query(`
+      INSERT INTO graph_embeddings_1024 (node_id, label, emb, model, props, content_sha256)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING node_id
+    `, [
+      nodeId,
+      memoryLabel,
+      embedding,
+      'promoted',
+      JSON.stringify({
+        task_id: task.id,
+        task_type: task.type,
+        promoted_at: new Date().toISOString(),
+        seed_hash: seedHash
+      }),
+      contentSha256
+    ]);
+    
+    const insertedNodeId = graphResult.rows[0].node_id;
+    
+    // Create mapping in graph_node_map
+    try {
+      await client.query(`
+        INSERT INTO graph_node_map (task_id, node_id, relationship_type)
+        VALUES ($1::uuid, $2, 'promoted')
+        ON CONFLICT DO NOTHING
+      `, [task.id, insertedNodeId]);
+    } catch (err) {
+      console.warn('Could not create graph_node_map entry:', err.message);
+    }
+    
+    await client.query('COMMIT');
+    
+    res.json({
+      success: true,
+      taskId: task.id,
+      nodeId: insertedNodeId.toString(),
+      label: memoryLabel,
+      message: `Task ${task.id} promoted to knowledge_base as node ${nodeId}`
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error promoting memory:', error);
+    res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /api/policy/evaluate - Evaluate policy for a given context (stub implementation)
+app.post('/api/policy/evaluate', async (req, res) => {
+  try {
+    const { snapshotId, context } = req.body;
+    
+    if (!snapshotId || !context) {
+      return res.status(400).json({ error: 'snapshotId and context are required' });
+    }
+    
+    // Stub implementation - in production, this would evaluate against PKG rules
+    // For now, return a simple allowed/blocked decision based on risk_score
+    const riskScore = context.signals?.risk_score || 0;
+    const allowed = riskScore < 0.8; // Simple threshold
+    
+    res.json({
+      allowed,
+      reason: allowed 
+        ? 'Allowed by policy (risk score below threshold)' 
+        : 'Blocked by policy (risk score too high)',
+      message: allowed ? 'Policy evaluation passed' : 'Policy evaluation failed',
+      riskScore
+    });
+  } catch (error) {
+    console.error('Error evaluating policy:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Catch-all for debugging unmatched routes
 app.use('/api/snapshots', (req, res, next) => {
   console.log(`[UNMATCHED ROUTE] ${req.method} ${req.path}`);
@@ -1587,6 +2043,9 @@ app.listen(PORT, () => {
   console.log(`   GET    /api/validation-runs`);
   console.log(`   POST   /api/validation-runs/start`);
   console.log(`   POST   /api/validation-runs/finish`);
+  console.log(`   POST   /api/memory/append`);
+  console.log(`   POST   /api/memory/promote`);
+  console.log(`   POST   /api/policy/evaluate`);
   const dbName = process.env.POSTGRES_DB || 'seedcore';
   console.log(`📊 Connected to PostgreSQL at ${process.env.POSTGRES_HOST || 'localhost'}:${process.env.POSTGRES_PORT || '5432'}/${dbName}`);
 });

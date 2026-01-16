@@ -12,6 +12,7 @@ export enum AppPage {
   INITIALIZATION = 'initialize',
   KNOWLEDGE = 'knowledge',
   MEMORY = 'memory',
+  SEED_DATA = 'seed-data',
 
   // Authoring Plane - "What should happen?"
   POLICY_STUDIO = 'policy-studio',
@@ -41,6 +42,7 @@ export const FEATURE_SEQUENCE: AppPage[] = [
   AppPage.INITIALIZATION,
   AppPage.KNOWLEDGE,
   AppPage.MEMORY,
+  AppPage.SEED_DATA,
   
   // Authoring Plane
   AppPage.POLICY_STUDIO,
@@ -85,6 +87,10 @@ export const PAGE_METADATA: Partial<Record<AppPage, PageMetadata>> = {
   [AppPage.MEMORY]: {
     label: 'Unified Memory',
     description: 'Browse temporal facts and system memory',
+  },
+  [AppPage.SEED_DATA]: {
+    label: 'Seed Generator',
+    description: 'Generate wearable design seeds using Gemini AI and PKG policy',
   },
   [AppPage.POLICY_STUDIO]: {
     label: 'Policy Studio',

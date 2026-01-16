@@ -1,5 +1,5 @@
 import React from 'react';
-import { Activity, Database, GitBranch, Play, LayoutDashboard, BrainCircuit, Cpu } from 'lucide-react';
+import { Activity, Database, GitBranch, Play, LayoutDashboard, BrainCircuit, Cpu, Sparkles } from 'lucide-react';
 import { AppPage, FEATURE_SEQUENCE, PAGE_METADATA } from '../appPages';
 
 interface LayoutProps {
@@ -19,6 +19,7 @@ export const Layout: React.FC<LayoutProps> = ({ children, activePage, onNavigate
     [AppPage.KNOWLEDGE]: Database,
     [AppPage.MEMORY]: BrainCircuit,
     [AppPage.INITIALIZATION]: Activity,
+    [AppPage.SEED_DATA]: Sparkles,
   };
 
   // Build navigation items from feature sequence

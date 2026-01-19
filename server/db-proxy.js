@@ -1840,12 +1840,19 @@ app.post('/api/memory/append', async (req, res) => {
 });
 
 // POST /api/memory/promote - Promote an item from event_working to knowledge_base
+// Implements the "Read-Transform-Write-Delete" pattern for Unified Memory promotion
 app.post('/api/memory/promote', async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     
-    const { seedHash, taskId, label } = req.body;
+    const { seedHash, taskId, label, actor, snapshotId, deleteSource } = req.body;
+    
+    // Actor defaults to 'system' if not provided
+    const promotionActor = actor || 'system';
+    
+    // Delete source task after promotion (default: true for clean memory)
+    const shouldDeleteSource = deleteSource !== false;
     
     if (!taskId && !seedHash) {
       await client.query('ROLLBACK');
@@ -1854,13 +1861,13 @@ app.post('/api/memory/promote', async (req, res) => {
     
     const memoryLabel = label || 'wearable.ticket';
     
-    // Find the task by taskId (UUID) or by searching metadata for seedHash
+    // STEP 1: READ - Fetch the raw seed/task and its multimodal embeddings from event_working
     let task;
     if (taskId) {
       const taskResult = await client.query('SELECT * FROM tasks WHERE id = $1', [taskId]);
       if (taskResult.rows.length === 0) {
         await client.query('ROLLBACK');
-        return res.status(404).json({ error: `Task ${taskId} not found` });
+        return res.status(404).json({ error: `Task ${taskId} not found in event_working` });
       }
       task = taskResult.rows[0];
     } else {
@@ -1868,14 +1875,16 @@ app.post('/api/memory/promote', async (req, res) => {
       const tasksResult = await client.query('SELECT * FROM tasks WHERE params::text LIKE $1', [`%${seedHash}%`]);
       if (tasksResult.rows.length === 0) {
         await client.query('ROLLBACK');
-        return res.status(404).json({ error: `Task with seedHash ${seedHash} not found` });
+        return res.status(404).json({ error: `Task with seedHash ${seedHash} not found in event_working` });
       }
       task = tasksResult.rows[0];
     }
     
     // Get the embedding from task_multimodal_embeddings
     const embeddingResult = await client.query(`
-      SELECT emb FROM task_multimodal_embeddings WHERE task_id = $1
+      SELECT emb, source_modality, model_version 
+      FROM task_multimodal_embeddings 
+      WHERE task_id = $1
     `, [task.id]);
     
     if (embeddingResult.rows.length === 0) {
@@ -1883,12 +1892,37 @@ app.post('/api/memory/promote', async (req, res) => {
       return res.status(404).json({ error: `No embedding found for task ${task.id}` });
     }
     
-    const embedding = embeddingResult.rows[0].emb;
+    const embeddingData = embeddingResult.rows[0];
+    const embedding = embeddingData.emb;
     
-    // Compute content SHA256
+    // STEP 2: TRANSFORM - Re-map fields to fit the knowledge_base schema
+    // Preserve snapshot_id and pkg_provenance (Migration 016) for auditability
+    const taskParams = task.params || {};
+    const taskMetadata = typeof taskParams === 'string' ? JSON.parse(taskParams) : taskParams;
+    
+    // Extract snapshot_id from task metadata or use provided snapshotId
+    const activeSnapshotId = snapshotId || taskMetadata.snapshot_id || null;
+    
+    // Build pkg_provenance for audit trail (Migration 016)
+    const pkgProvenance = {
+      source_task_id: task.id,
+      source_task_type: task.type,
+      source_status: task.status,
+      promoted_at: new Date().toISOString(),
+      promoted_by: promotionActor,
+      seed_hash: seedHash || taskMetadata.seed_hash,
+      source_modality: embeddingData.source_modality,
+      model_version: embeddingData.model_version,
+      original_created_at: task.created_at,
+      ...(activeSnapshotId && { snapshot_id: activeSnapshotId }),
+      ...(taskMetadata.pkg_rule_id && { pkg_rule_id: taskMetadata.pkg_rule_id }),
+      ...(taskMetadata.pkg_provenance && { inherited_provenance: taskMetadata.pkg_provenance })
+    };
+    
+    // Compute content SHA256 for deduplication
     const contentSha256 = crypto.createHash('sha256').update(task.description || '').digest('hex');
     
-    // Generate node_id - Option A: Check sequence existence first (industry-grade)
+    // Generate node_id - Check sequence existence first (industry-grade)
     let nodeId;
     
     try {
@@ -1933,28 +1967,39 @@ app.post('/api/memory/promote', async (req, res) => {
       return res.status(500).json({ error: `Invalid node_id generated: ${nodeId}` });
     }
     
-    // Insert into graph_embeddings_1024
+    // STEP 3: WRITE - Insert into graph_embeddings_1024 (Tier B/C)
+    // Map the 1024d multimodal vector to the graph embedding table
     const graphResult = await client.query(`
       INSERT INTO graph_embeddings_1024 (node_id, label, emb, model, props, content_sha256)
-      VALUES ($1, $2, $3, $4, $5, $6)
+      VALUES ($1, $2, $3::vector, $4, $5, $6)
       RETURNING node_id
     `, [
       nodeId,
       memoryLabel,
       embedding,
-      'promoted',
+      embeddingData.model_version || 'promoted',
       JSON.stringify({
+        // Preserve original task metadata
         task_id: task.id,
         task_type: task.type,
+        task_description: task.description,
+        // PKG provenance (Migration 016)
+        pkg_provenance: pkgProvenance,
+        snapshot_id: activeSnapshotId,
+        // Promotion metadata
         promoted_at: new Date().toISOString(),
-        seed_hash: seedHash
+        promoted_by: promotionActor,
+        seed_hash: seedHash || taskMetadata.seed_hash,
+        // Embedding metadata
+        source_modality: embeddingData.source_modality,
+        model_version: embeddingData.model_version
       }),
       contentSha256
     ]);
     
     const insertedNodeId = graphResult.rows[0].node_id;
     
-    // Create mapping in graph_node_map
+    // STEP 4: REGISTER - Update the graph_node_map (Migration 017) to link the new entity into the Knowledge Graph
     try {
       await client.query(`
         INSERT INTO graph_node_map (task_id, node_id, relationship_type)
@@ -1963,6 +2008,25 @@ app.post('/api/memory/promote', async (req, res) => {
       `, [task.id, insertedNodeId]);
     } catch (err) {
       console.warn('Could not create graph_node_map entry:', err.message);
+      // Non-fatal error, continue
+    }
+    
+    // STEP 5: CLEAN UP - Remove the original entry from event_working to prevent memory fragmentation
+    if (shouldDeleteSource) {
+      try {
+        // Delete multimodal embeddings first (FK constraint)
+        await client.query(`
+          DELETE FROM task_multimodal_embeddings WHERE task_id = $1
+        `, [task.id]);
+        
+        // Then delete the task
+        await client.query(`
+          DELETE FROM tasks WHERE id = $1
+        `, [task.id]);
+      } catch (deleteError) {
+        console.warn('Could not delete source task (non-fatal):', deleteError.message);
+        // Non-fatal error - promotion succeeded, just log warning
+      }
     }
     
     await client.query('COMMIT');
@@ -1972,18 +2036,29 @@ app.post('/api/memory/promote', async (req, res) => {
       taskId: task.id,
       nodeId: insertedNodeId.toString(),
       label: memoryLabel,
-      message: `Task ${task.id} promoted to knowledge_base as node ${nodeId}`
+      snapshotId: activeSnapshotId,
+      promotedBy: promotionActor,
+      sourceDeleted: shouldDeleteSource,
+      message: `Task ${task.id} successfully promoted to knowledge_base as node ${nodeId}`,
+      provenance: pkgProvenance
     });
   } catch (error) {
-    await client.query('ROLLBACK');
+    try {
+      await client.query('ROLLBACK');
+    } catch (rollbackError) {
+      // Ignore rollback errors - transaction might already be rolled back
+    }
     console.error('Error promoting memory:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ 
+      error: error.message,
+      details: error.detail || null
+    });
   } finally {
     client.release();
   }
 });
 
-// POST /api/policy/evaluate - Evaluate policy for a given context (stub implementation)
+// POST /api/policy/evaluate - Evaluate policy for a given context using PKG rules
 app.post('/api/policy/evaluate', async (req, res) => {
   try {
     const { snapshotId, context } = req.body;
@@ -1992,21 +2067,445 @@ app.post('/api/policy/evaluate', async (req, res) => {
       return res.status(400).json({ error: 'snapshotId and context are required' });
     }
     
-    // Stub implementation - in production, this would evaluate against PKG rules
-    // For now, return a simple allowed/blocked decision based on risk_score
+    // Fetch active rules for this snapshot
+    const rulesResult = await pool.query(`
+      SELECT 
+        r.id, r.rule_name, r.priority, r.engine, r.disabled,
+        r.rule_source, r.metadata
+      FROM pkg_policy_rules r
+      WHERE r.snapshot_id = $1 AND r.disabled = FALSE
+      ORDER BY r.priority ASC
+    `, [snapshotId]);
+    
+    if (rulesResult.rows.length === 0) {
+      // No rules defined - default to allow with warning
+      return res.json({
+        allowed: true,
+        reason: 'No policy rules defined for this snapshot - defaulting to allow',
+        message: 'Policy evaluation passed (no rules)',
+        riskScore: context.signals?.risk_score || 0,
+        matchedRules: []
+      });
+    }
+    
+    // Fetch conditions for all rules
+    const ruleIds = rulesResult.rows.map(r => r.id);
+    const conditionsResult = await pool.query(`
+      SELECT rule_id, condition_type, condition_key, operator, value, position
+      FROM pkg_rule_conditions
+      WHERE rule_id = ANY($1::uuid[])
+      ORDER BY rule_id, position
+    `, [ruleIds]);
+    
+    // Fetch emissions for all rules
+    const emissionsResult = await pool.query(`
+      SELECT 
+        e.rule_id, e.subtask_type_id, e.relationship_type, e.params, e.position,
+        st.name as subtask_name
+      FROM pkg_rule_emissions e
+      JOIN pkg_subtask_types st ON e.subtask_type_id = st.id
+      WHERE e.rule_id = ANY($1::uuid[])
+      ORDER BY e.rule_id, e.position
+    `, [ruleIds]);
+    
+    // Group conditions and emissions by rule_id
+    const conditionsByRule = new Map();
+    const emissionsByRule = new Map();
+    
+    conditionsResult.rows.forEach(row => {
+      if (!conditionsByRule.has(row.rule_id)) {
+        conditionsByRule.set(row.rule_id, []);
+      }
+      conditionsByRule.get(row.rule_id).push({
+        conditionType: row.condition_type,
+        conditionKey: row.condition_key,
+        operator: row.operator,
+        value: row.value,
+      });
+    });
+    
+    emissionsResult.rows.forEach(row => {
+      if (!emissionsByRule.has(row.rule_id)) {
+        emissionsByRule.set(row.rule_id, []);
+      }
+      emissionsByRule.get(row.rule_id).push({
+        subtaskName: row.subtask_name,
+        relationshipType: row.relationship_type,
+        params: row.params,
+        position: row.position,
+      });
+    });
+    
+    // Evaluate rules against context
+    const matchedRules = [];
+    let blockingRule = null;
+    
+    for (const ruleRow of rulesResult.rows) {
+      const ruleId = ruleRow.id;
+      const conditions = conditionsByRule.get(ruleId) || [];
+      
+      // Evaluate all conditions (ALL must pass)
+      let allConditionsMatch = true;
+      const conditionResults = [];
+      
+      for (const condition of conditions) {
+        let actualValue = null;
+        
+        // Resolve value based on condition type
+        switch (condition.conditionType) {
+          case 'TAG':
+            // Check if tag exists in context.tags array
+            const tags = context.tags || [];
+            actualValue = tags.find(t => {
+              if (condition.operator === 'EXISTS') {
+                return t.includes(condition.conditionKey);
+              }
+              if (condition.operator === 'MATCHES') {
+                const regex = new RegExp(condition.value || '');
+                return regex.test(t);
+              }
+              return t === `${condition.conditionKey}=${condition.value}`;
+            });
+            break;
+            
+          case 'SIGNAL':
+            actualValue = context.signals?.[condition.conditionKey];
+            break;
+            
+          case 'VALUE':
+            actualValue = context.values?.[condition.conditionKey] || condition.conditionKey;
+            break;
+            
+          case 'FACT':
+            // Simplified fact check - in production would query facts table
+            actualValue = context.facts?.find(f => f.predicate === condition.conditionKey)?.object;
+            break;
+        }
+        
+        // Evaluate operator
+        let conditionMatches = false;
+        switch (condition.operator) {
+          case 'EXISTS':
+            conditionMatches = actualValue !== undefined && actualValue !== null;
+            break;
+          case '=':
+            conditionMatches = String(actualValue) === condition.value;
+            break;
+          case '!=':
+            conditionMatches = String(actualValue) !== condition.value;
+            break;
+          case '>':
+            conditionMatches = Number(actualValue) > Number(condition.value);
+            break;
+          case '>=':
+            conditionMatches = Number(actualValue) >= Number(condition.value);
+            break;
+          case '<':
+            conditionMatches = Number(actualValue) < Number(condition.value);
+            break;
+          case '<=':
+            conditionMatches = Number(actualValue) <= Number(condition.value);
+            break;
+          case 'IN':
+            const values = (condition.value || '').split(',').map(v => v.trim());
+            conditionMatches = values.includes(String(actualValue));
+            break;
+          case 'MATCHES':
+            if (condition.value && actualValue) {
+              const regex = new RegExp(condition.value);
+              conditionMatches = regex.test(String(actualValue));
+            }
+            break;
+        }
+        
+        conditionResults.push({
+          condition,
+          matches: conditionMatches,
+          actualValue
+        });
+        
+        if (!conditionMatches) {
+          allConditionsMatch = false;
+        }
+      }
+      
+      // If all conditions match, rule is triggered
+      if (allConditionsMatch && conditions.length > 0) {
+        const emissions = emissionsByRule.get(ruleId) || [];
+        matchedRules.push({
+          ruleId: ruleId.toString(),
+          ruleName: ruleRow.rule_name,
+          priority: ruleRow.priority,
+          emissions: emissions,
+          conditionResults
+        });
+        
+        // Check if this rule blocks (has GATE emission or high priority blocking rule)
+        // Rules with GATE emissions typically block, OR rules with very high priority (low number) can block
+        const hasGate = emissions.some(e => e.relationshipType === 'GATE');
+        if (hasGate || ruleRow.priority < 20) {
+          blockingRule = {
+            ruleId: ruleId.toString(),
+            ruleName: ruleRow.rule_name,
+            reason: hasGate 
+              ? `Rule "${ruleRow.rule_name}" requires gate condition`
+              : `High-priority rule "${ruleRow.rule_name}" blocked the request`
+          };
+          break; // Stop evaluation on blocking rule
+        }
+      }
+    }
+    
+    // Determine final decision
     const riskScore = context.signals?.risk_score || 0;
-    const allowed = riskScore < 0.8; // Simple threshold
+    const allowed = !blockingRule && riskScore < 0.8;
     
     res.json({
       allowed,
-      reason: allowed 
-        ? 'Allowed by policy (risk score below threshold)' 
-        : 'Blocked by policy (risk score too high)',
+      reason: blockingRule 
+        ? blockingRule.reason
+        : allowed 
+          ? `Allowed by policy (${matchedRules.length} rule(s) matched)`
+          : `Blocked by policy (risk score: ${riskScore.toFixed(2)})`,
       message: allowed ? 'Policy evaluation passed' : 'Policy evaluation failed',
-      riskScore
+      riskScore,
+      matchedRules: matchedRules.map(r => ({
+        ruleId: r.ruleId,
+        ruleName: r.ruleName,
+        priority: r.priority,
+        emissions: r.emissions
+      })),
+      blockingRule: blockingRule || undefined
     });
   } catch (error) {
     console.error('Error evaluating policy:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/design/govern - Complete design governance workflow
+// Note: This endpoint calls the design governance service
+// For production, ensure TypeScript is compiled or use a JS version
+app.post('/api/design/govern', async (req, res) => {
+  try {
+    const { designContext, snapshotId } = req.body;
+    
+    if (!designContext || !snapshotId) {
+      return res.status(400).json({ error: 'designContext and snapshotId are required' });
+    }
+    
+    // Get snapshot
+    const snapshotResult = await pool.query(
+      'SELECT id, version, env FROM pkg_snapshots WHERE id = $1',
+      [snapshotId]
+    );
+    
+    if (snapshotResult.rows.length === 0) {
+      return res.status(404).json({ error: `Snapshot ${snapshotId} not found` });
+    }
+    
+    const snapshot = {
+      id: snapshotResult.rows[0].id,
+      version: snapshotResult.rows[0].version,
+      env: snapshotResult.rows[0].env,
+    };
+    
+    // For now, return a structured response indicating the service should be called from frontend
+    // In production, compile TypeScript or create a JS version of the service
+    res.json({
+      message: 'Design governance service available - call from frontend using designGovernanceService.ts',
+      snapshot: snapshot,
+      designContext: designContext,
+      note: 'See DESIGN_GOVERNANCE.md for integration instructions'
+    });
+    
+    // TODO: Once TypeScript is compiled or JS version created, uncomment:
+    // const { governDesign } = await import('../services/designGovernanceService.js');
+    // const analysis = await governDesign(designContext, snapshot, `http://localhost:${PORT}`, process.env.GEMINI_API_KEY);
+    // res.json(analysis);
+  } catch (error) {
+    console.error('Error in design governance:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/validation/digital-twin - Step 5: Digital Twin validation
+app.post('/api/validation/digital-twin', async (req, res) => {
+  try {
+    const { snapshotId } = req.body;
+    
+    if (!snapshotId) {
+      return res.status(400).json({ error: 'snapshotId is required' });
+    }
+    
+    // Get snapshot
+    const snapshotResult = await pool.query(
+      'SELECT id, version, env FROM pkg_snapshots WHERE id = $1',
+      [snapshotId]
+    );
+    
+    if (snapshotResult.rows.length === 0) {
+      return res.status(404).json({ error: `Snapshot ${snapshotId} not found` });
+    }
+    
+    const snapshot = {
+      id: snapshotResult.rows[0].id,
+      version: snapshotResult.rows[0].version,
+      env: snapshotResult.rows[0].env,
+    };
+    
+    // Get rules for snapshot
+    const rulesResult = await pool.query(`
+      SELECT r.id, r.rule_name, r.priority, r.engine, r.disabled, r.rule_source
+      FROM pkg_policy_rules r
+      WHERE r.snapshot_id = $1 AND r.disabled = FALSE
+      ORDER BY r.priority ASC
+    `, [snapshotId]);
+    
+    // Get conditions and emissions for rules
+    const ruleIds = rulesResult.rows.map(r => r.id);
+    const conditionsResult = await pool.query(`
+      SELECT rule_id, condition_type, condition_key, operator, value, position
+      FROM pkg_rule_conditions
+      WHERE rule_id = ANY($1::uuid[])
+      ORDER BY rule_id, position
+    `, [ruleIds]);
+    
+    const emissionsResult = await pool.query(`
+      SELECT e.rule_id, e.subtask_type_id, e.relationship_type, e.params, e.position,
+             st.name as subtask_name
+      FROM pkg_rule_emissions e
+      JOIN pkg_subtask_types st ON e.subtask_type_id = st.id
+      WHERE e.rule_id = ANY($1::uuid[])
+      ORDER BY e.rule_id, e.position
+    `, [ruleIds]);
+    
+    // Build Rule objects
+    const conditionsByRule = new Map();
+    const emissionsByRule = new Map();
+    
+    conditionsResult.rows.forEach(row => {
+      if (!conditionsByRule.has(row.rule_id)) {
+        conditionsByRule.set(row.rule_id, []);
+      }
+      conditionsByRule.get(row.rule_id).push({
+        conditionType: row.condition_type,
+        conditionKey: row.condition_key,
+        operator: row.operator,
+        value: row.value,
+      });
+    });
+    
+    emissionsResult.rows.forEach(row => {
+      if (!emissionsByRule.has(row.rule_id)) {
+        emissionsByRule.set(row.rule_id, []);
+      }
+      emissionsByRule.get(row.rule_id).push({
+        subtaskName: row.subtask_name,
+        relationshipType: row.relationship_type,
+        params: row.params,
+        position: row.position,
+      });
+    });
+    
+    const rules = rulesResult.rows.map(row => ({
+      id: row.id.toString(),
+      ruleName: row.rule_name,
+      priority: row.priority,
+      engine: row.engine,
+      disabled: row.disabled,
+      ruleSource: row.rule_source,
+      conditions: conditionsByRule.get(row.id) || [],
+      emissions: emissionsByRule.get(row.id) || [],
+    }));
+    
+    // Call Digital Twin validation service (frontend will handle this)
+    res.json({
+      message: 'Digital Twin validation - call from frontend using digitalTwinService.ts',
+      snapshot: snapshot,
+      rulesCount: rules.length,
+      note: 'See TRINITY_ENHANCEMENTS.md for integration instructions'
+    });
+  } catch (error) {
+    console.error('Error in digital twin validation:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/policy/evaluate-temporal - Step 6: Temporal policy evaluation
+app.post('/api/policy/evaluate-temporal', async (req, res) => {
+  try {
+    const { snapshotId, context, currentTime } = req.body;
+    
+    if (!snapshotId || !context) {
+      return res.status(400).json({ error: 'snapshotId and context are required' });
+    }
+    
+    const evalTime = currentTime || new Date().toISOString();
+    
+    // Get active facts at current time (temporal filtering)
+    const factsResult = await pool.query(`
+      SELECT 
+        id::text as id,
+        snapshot_id,
+        namespace,
+        subject,
+        predicate,
+        object_data as object,
+        valid_from,
+        valid_to,
+        created_by,
+        CASE
+          WHEN valid_to IS NULL THEN 'active'
+          WHEN valid_to > $1::timestamptz THEN 'active'
+          ELSE 'expired'
+        END as status
+      FROM facts
+      WHERE (valid_from IS NULL OR valid_from <= $1::timestamptz)
+        AND (valid_to IS NULL OR valid_to > $1::timestamptz)
+        AND snapshot_id = $2
+      ORDER BY valid_from DESC
+    `, [evalTime, snapshotId]);
+    
+    const temporalFacts = factsResult.rows.map(row => ({
+      id: row.id,
+      snapshotId: row.snapshot_id,
+      namespace: row.namespace,
+      subject: row.subject,
+      predicate: row.predicate,
+      object: row.object || {},
+      validFrom: row.valid_from?.toISOString(),
+      validTo: row.valid_to?.toISOString(),
+      status: row.status,
+      createdBy: row.created_by,
+    }));
+    
+    // Get rules
+    const rulesResult = await pool.query(`
+      SELECT r.id, r.rule_name, r.priority, r.disabled
+      FROM pkg_policy_rules r
+      WHERE r.snapshot_id = $1 AND r.disabled = FALSE
+      ORDER BY r.priority ASC
+    `, [snapshotId]);
+    
+    // Build evaluation context with temporal facts
+    const evaluationContext = {
+      currentTime: evalTime,
+      facts: temporalFacts,
+      tags: context.tags || {},
+      signals: context.signals || {},
+    };
+    
+    // Return context for frontend evaluation
+    res.json({
+      message: 'Temporal policy evaluation - call from frontend using temporalPolicyService.ts',
+      evaluationContext,
+      rulesCount: rulesResult.rows.length,
+      activeFactsCount: temporalFacts.length,
+      note: 'See TRINITY_ENHANCEMENTS.md for integration instructions'
+    });
+  } catch (error) {
+    console.error('Error in temporal policy evaluation:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2046,6 +2545,10 @@ app.listen(PORT, () => {
   console.log(`   POST   /api/memory/append`);
   console.log(`   POST   /api/memory/promote`);
   console.log(`   POST   /api/policy/evaluate`);
+  console.log(`   POST   /api/design/govern`);
+  console.log(`   POST   /api/validation/digital-twin`);
+  console.log(`   POST   /api/policy/evaluate-temporal`);
+  console.log(`   WS     /api/design/govern-stream`);
   const dbName = process.env.POSTGRES_DB || 'seedcore';
   console.log(`📊 Connected to PostgreSQL at ${process.env.POSTGRES_HOST || 'localhost'}:${process.env.POSTGRES_PORT || '5432'}/${dbName}`);
 });

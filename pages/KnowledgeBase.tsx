@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { getFacts, getUnifiedMemory, clearCache } from '../mockData';
+import { fetchSnapshots } from '../services/database';
 import {
   Clock,
   Brain,
@@ -12,11 +13,23 @@ import {
   X,
   ChevronLeft,
   ChevronRight,
+  GitBranch,
 } from 'lucide-react';
-import { Fact, UnifiedMemoryItem } from '../types';
+import { Fact, UnifiedMemoryItem, Snapshot } from '../types';
 
 interface KnowledgeBaseProps {
   view: string; // 'knowledge' | 'memory'
+}
+
+interface EnhancedFact extends Fact {
+  snapshotId?: number;
+  pkgRuleId?: string;
+  pkgProvenance?: any;
+}
+
+interface EnhancedMemoryItem extends UnifiedMemoryItem {
+  snapshotId?: number;
+  confidenceScore?: number;
 }
 
 type MemoryTier = UnifiedMemoryItem['memoryTier']; // 'event_working' | 'knowledge_base' | 'world_memory'
@@ -50,8 +63,9 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
   const isMemory = view === 'memory';
 
   // Data
-  const [facts, setFacts] = useState<Fact[]>([]);
-  const [unifiedMemory, setUnifiedMemory] = useState<UnifiedMemoryItem[]>([]);
+  const [facts, setFacts] = useState<EnhancedFact[]>([]);
+  const [unifiedMemory, setUnifiedMemory] = useState<EnhancedMemoryItem[]>([]);
+  const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
 
   // UX State
   const [loading, setLoading] = useState(true);
@@ -62,6 +76,12 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
   const [query, setQuery] = useState('');
   const [tierFilter, setTierFilter] = useState<MemoryTier | 'all'>('all');
   const [factStatusFilter, setFactStatusFilter] = useState<FactStatus | 'all'>('all');
+  
+  // Snapshot scoping (Migration 017)
+  const [activeSnapshot, setActiveSnapshot] = useState<number | 'all'>('all');
+  
+  // Temporal simulation (Step 6)
+  const [simulatedTime, setSimulatedTime] = useState<string>(new Date().toISOString());
 
   // Pagination
   const [page, setPage] = useState(1);
@@ -84,9 +104,10 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
       // (safe even if it does nothing)
       if (force) clearCache?.();
 
-      const [fcts, mem] = await Promise.all([
+      const [fcts, mem, snaps] = await Promise.all([
         getFacts(),
         isMemory ? getUnifiedMemory(500) : Promise.resolve([]),
+        fetchSnapshots().catch(() => []), // Gracefully handle if snapshots endpoint fails
       ]);
 
       // Stable default sort: newest first (facts by validFrom/createdBy not guaranteed, so use validFrom fallback)
@@ -96,8 +117,9 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
         return tb - ta;
       });
 
-      setFacts(sortedFacts);
-      setUnifiedMemory(isMemory ? mem : []);
+      setFacts(sortedFacts as EnhancedFact[]);
+      setUnifiedMemory(isMemory ? (mem as EnhancedMemoryItem[]) : []);
+      setSnapshots(snaps);
 
       // Reset paging when switching view / refresh
       setPage(1);
@@ -115,12 +137,6 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isMemory]);
 
-  // Derived stats
-  const activeFactsCount = useMemo(
-    () => facts.filter(f => f.status === 'active').length,
-    [facts]
-  );
-
   const memoryTierCounts = useMemo(() => {
     const base = { event_working: 0, knowledge_base: 0, world_memory: 0 };
     for (const m of unifiedMemory) base[m.memoryTier] = (base[m.memoryTier] || 0) + 1;
@@ -131,6 +147,9 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
   const filteredMemory = useMemo(() => {
     const q = query.trim().toLowerCase();
     return unifiedMemory.filter(m => {
+      // Snapshot scoping (Migration 017)
+      if (activeSnapshot !== 'all' && m.snapshotId !== activeSnapshot) return false;
+      
       if (tierFilter !== 'all' && m.memoryTier !== tierFilter) return false;
       if (!q) return true;
       return (
@@ -139,13 +158,26 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
         safeStringify(m.metadata || {}).toLowerCase().includes(q)
       );
     });
-  }, [unifiedMemory, query, tierFilter]);
+  }, [unifiedMemory, query, tierFilter, activeSnapshot]);
 
   const filteredFacts = useMemo(() => {
     const q = query.trim().toLowerCase();
+    const now = new Date(simulatedTime);
+    
     return facts.filter(f => {
+      // Phase 3 & 4: Filter by Snapshot ID to prevent cross-contamination
+      if (activeSnapshot !== 'all' && f.snapshotId !== activeSnapshot) return false;
+      
+      // Step 6: Dynamic Temporal Filtering
+      const validFrom = f.validFrom ? new Date(f.validFrom) : null;
+      const validTo = f.validTo ? new Date(f.validTo) : null;
+      
+      if (validFrom && now < validFrom) return false; // Future fact
+      if (validTo && now > validTo) return false;     // Expired fact
+      
       if (factStatusFilter !== 'all' && f.status !== factStatusFilter) return false;
       if (!q) return true;
+      
       return (
         (f.namespace || '').toLowerCase().includes(q) ||
         (f.subject || '').toLowerCase().includes(q) ||
@@ -153,7 +185,19 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
         safeStringify(f.object).toLowerCase().includes(q)
       );
     });
-  }, [facts, query, factStatusFilter]);
+  }, [facts, query, factStatusFilter, activeSnapshot, simulatedTime]);
+
+  // Derived stats (snapshot-aware, computed after filteredFacts)
+  const activeFactsCount = useMemo(() => {
+    const now = new Date(simulatedTime);
+    return filteredFacts.filter(f => {
+      const validFrom = f.validFrom ? new Date(f.validFrom) : null;
+      const validTo = f.validTo ? new Date(f.validTo) : null;
+      if (validFrom && now < validFrom) return false;
+      if (validTo && now > validTo) return false;
+      return true;
+    }).length;
+  }, [filteredFacts, simulatedTime]);
 
   const rows = isMemory ? filteredMemory : filteredFacts;
 
@@ -199,7 +243,54 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
         </p>
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-3 flex-wrap">
+        {/* Snapshot Scoping Selector */}
+        <div className="flex items-center gap-2">
+          <label className="text-xs font-semibold text-gray-500 uppercase">Active World:</label>
+          <select
+            value={activeSnapshot}
+            onChange={(e) => {
+              const val = e.target.value === 'all' ? 'all' : Number(e.target.value);
+              setActiveSnapshot(val);
+              setPage(1);
+            }}
+            className="px-3 py-1.5 border border-indigo-200 bg-indigo-50 text-indigo-700 rounded-md text-xs font-mono focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+          >
+            <option value="all">Global Memory (Soup)</option>
+            {snapshots.map((snap) => (
+              <option key={snap.id} value={snap.id}>
+                {snap.version} ({snap.env})
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Temporal Simulation (Step 6) */}
+        {!isMemory && (
+          <div className="flex items-center gap-2">
+            <label className="text-xs font-semibold text-gray-500 uppercase">Simulated Time:</label>
+            <input
+              type="datetime-local"
+              value={simulatedTime.slice(0, 16)}
+              onChange={(e) => {
+                setSimulatedTime(new Date(e.target.value).toISOString());
+                setPage(1);
+              }}
+              className="px-2 py-1.5 border border-gray-300 rounded-md text-xs font-mono focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+            />
+            <button
+              onClick={() => {
+                setSimulatedTime(new Date().toISOString());
+                setPage(1);
+              }}
+              className="px-2 py-1.5 text-xs border border-gray-300 rounded-md hover:bg-gray-50"
+              title="Reset to current time"
+            >
+              Now
+            </button>
+          </div>
+        )}
+
         <button
           onClick={() => { setRefreshing(true); loadData({ force: true }); }}
           className="inline-flex items-center px-3 py-2 rounded-md border border-gray-200 hover:bg-gray-50 text-sm"
@@ -393,32 +484,46 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tier</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Category</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Content</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Snapshot</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Metadata</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {(pageRows as UnifiedMemoryItem[]).map((mem) => (
-                  <tr key={mem.id} className="hover:bg-gray-50">
-                    <td className="px-6 py-4 whitespace-nowrap">{tierBadge(mem.memoryTier)}</td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{mem.category}</td>
-                    <td className="px-6 py-4 text-sm text-gray-900 max-w-xl truncate" title={mem.content}>
-                      {mem.content}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      <button
-                        className="text-xs font-mono bg-gray-50 hover:bg-gray-100 border border-gray-200 px-2 py-1 rounded"
-                        onClick={() =>
-                          setJsonModal({
-                            title: `Memory Metadata • ${mem.id}`,
-                            body: safeStringify(mem.metadata, 2),
-                          })
-                        }
-                      >
-                        View JSON
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                {(pageRows as EnhancedMemoryItem[]).map((mem) => {
+                  const snapshot = mem.snapshotId ? snapshots.find(s => s.id === mem.snapshotId) : null;
+                  return (
+                    <tr key={mem.id} className="hover:bg-gray-50">
+                      <td className="px-6 py-4 whitespace-nowrap">{tierBadge(mem.memoryTier)}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{mem.category}</td>
+                      <td className="px-6 py-4 text-sm text-gray-900 max-w-xl truncate" title={mem.content}>
+                        {mem.content}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        {snapshot ? (
+                          <span className="inline-flex items-center text-xs font-mono text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-100">
+                            <GitBranch className="w-3 h-3 mr-1" />
+                            {snapshot.version}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-gray-400 italic">—</span>
+                        )}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        <button
+                          className="text-xs font-mono bg-gray-50 hover:bg-gray-100 border border-gray-200 px-2 py-1 rounded"
+                          onClick={() =>
+                            setJsonModal({
+                              title: `Memory Metadata • ${mem.id}`,
+                              body: safeStringify(mem.metadata, 2),
+                            })
+                          }
+                        >
+                          View JSON
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           ) : (
@@ -429,11 +534,12 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Subject</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Predicate</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Object</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Provenance</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Validity</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {(pageRows as Fact[]).map((fact) => (
+                {(pageRows as EnhancedFact[]).map((fact) => (
                   <tr key={fact.id} className="hover:bg-gray-50">
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600 font-mono">{fact.namespace}</td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-indigo-600">{fact.subject}</td>
@@ -464,22 +570,71 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
                         View JSON
                       </button>
                     </td>
+                    {/* Provenance Column */}
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      {fact.pkgRuleId ? (
+                        <span 
+                          className="inline-flex items-center text-[10px] font-mono text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-100 cursor-help"
+                          title={`PKG Rule ID: ${fact.pkgRuleId}${fact.pkgProvenance ? '\nProvenance: ' + safeStringify(fact.pkgProvenance) : ''}`}
+                        >
+                          <Zap className="w-3 h-3 mr-1" /> {fact.pkgRuleId.slice(0, 8)}…
+                        </span>
+                      ) : (
+                        <span className="text-[10px] text-gray-400 italic">Manual Entry</span>
+                      )}
+                    </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                      <div className="flex flex-col">
-                        <span className="flex items-center text-xs text-gray-700">
-                          <Clock className="h-3 w-3 mr-1" /> From: {formatDate(fact.validFrom)}
-                        </span>
-                        {fact.validTo ? (
-                          <span className="flex items-center text-xs text-gray-500">
-                            <Clock className="h-3 w-3 mr-1" /> To: {formatDate(fact.validTo)}
-                          </span>
-                        ) : (
-                          <span className="text-xs text-gray-400">To: —</span>
-                        )}
-                        <span className="text-xs text-gray-400 mt-1">
-                          {formatDateTime(fact.validFrom)}
-                        </span>
-                      </div>
+                      {/* Temporal Timeline Visualization */}
+                      {fact.validFrom ? (
+                        <div className="space-y-2">
+                          <div className="w-48 h-2 bg-gray-100 rounded-full overflow-hidden relative">
+                            {(() => {
+                              const now = new Date(simulatedTime);
+                              const from = new Date(fact.validFrom);
+                              const to = fact.validTo ? new Date(fact.validTo) : null;
+                              
+                              // Calculate progress
+                              let progress = 0;
+                              let isActive = false;
+                              let isExpired = false;
+                              
+                              if (to) {
+                                const total = to.getTime() - from.getTime();
+                                const elapsed = now.getTime() - from.getTime();
+                                progress = Math.max(0, Math.min(100, (elapsed / total) * 100));
+                                isActive = now >= from && now <= to;
+                                isExpired = now > to;
+                              } else {
+                                // Indefinite validity
+                                isActive = now >= from;
+                                progress = isActive ? 100 : 0;
+                              }
+                              
+                              const bgColor = isExpired 
+                                ? 'bg-red-500' 
+                                : isActive 
+                                ? 'bg-green-500' 
+                                : 'bg-blue-500';
+                              
+                              return (
+                                <div 
+                                  className={`h-full ${bgColor} transition-all`}
+                                  style={{ width: `${progress}%` }}
+                                />
+                              );
+                            })()}
+                          </div>
+                          <div className="flex justify-between text-[10px] font-mono text-gray-600">
+                            <span>{formatDate(fact.validFrom)}</span>
+                            <span>{fact.validTo ? formatDate(fact.validTo) : '∞'}</span>
+                          </div>
+                          <div className="text-[10px] text-gray-400">
+                            {formatDateTime(fact.validFrom)}
+                          </div>
+                        </div>
+                      ) : (
+                        <span className="text-xs text-gray-400">No validity window</span>
+                      )}
                     </td>
                   </tr>
                 ))}

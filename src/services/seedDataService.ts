@@ -208,6 +208,25 @@ export const seedDataService = {
       const ticketId = `SEEDCORE-MFG-${runId.slice(0, 8)}`;
       const title = `${intent.style} ${intent.type} - ${intent.persona}`;
       
+      // Build design context for governance
+      const designContext = {
+        guestId: `guest_${runId.slice(0, 8)}`,
+        guestTags: profile === "wearable_story" ? ["VIP"] : [],
+        guestCredits: 100, // Default credits
+        designMetadata: {
+          title: title,
+          description: intent.story,
+          colors: [intent.style], // Simplified - in production would extract from design
+          fabricType: intent.fabricType,
+          designType: intent.type.toLowerCase(),
+          inkConsumption: Math.floor(intent.story.length / 10), // Estimate based on complexity
+          complexity: intent.story.length > 200 ? "complex" : intent.story.length > 100 ? "moderate" : "simple" as const,
+        },
+        requestType: "print" as const,
+        runId,
+      };
+
+      // Build PKG policy context (for backward compatibility)
       const policyContext = buildPolicyContext(intent, "generate_design");
       checkAbort(options.signal);
       const policyDecision = await fetchJson(`${dbProxyUrl}/api/policy/evaluate`, {

@@ -1,6 +1,6 @@
 import React from 'react';
 import { Activity, Database, GitBranch, Play, LayoutDashboard, BrainCircuit, Cpu, Sparkles } from 'lucide-react';
-import { AppPage, FEATURE_SEQUENCE, PAGE_METADATA } from '../appPages';
+import { AppPage, FEATURE_SEQUENCE, PAGE_METADATA, FEATURE_GROUPS, GROUP_LABELS, FeatureGroup } from '../appPages';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -14,27 +14,36 @@ export const Layout: React.FC<LayoutProps> = ({ children, activePage, onNavigate
     [AppPage.DASHBOARD]: LayoutDashboard,
     [AppPage.CONTROL_PLANE]: Cpu,
     [AppPage.POLICY_STUDIO]: GitBranch,
-    [AppPage.POLICY_FACTORY]: GitBranch,
     [AppPage.SIMULATOR]: Play,
     [AppPage.KNOWLEDGE]: Database,
     [AppPage.MEMORY]: BrainCircuit,
     [AppPage.INITIALIZATION]: Activity,
     [AppPage.SEED_DATA]: Sparkles,
+    [AppPage.GOVERNANCE_COCKPIT]: Cpu, // Using Cpu icon for Mission Control
   };
 
-  // Build navigation items from feature sequence
-  // This ensures navigation follows the system lifecycle order
-  const navItems = FEATURE_SEQUENCE.map((page) => {
+  // Build navigation items grouped by Feature Groups
+  // This creates visual separation: Foundation → Creation → Operations
+  const groupedNavItems = FEATURE_SEQUENCE.reduce((acc, page) => {
+    const group = FEATURE_GROUPS[page];
+    if (!acc[group]) {
+      acc[group] = [];
+    }
+    
     const metadata = PAGE_METADATA[page];
     const Icon = pageIcons[page];
     
-    return {
+    acc[group].push({
       id: page,
       label: metadata?.label || page,
       icon: Icon,
       description: metadata?.description,
-    };
-  });
+      adminOnly: metadata?.adminOnly,
+      opsOnly: metadata?.opsOnly,
+    });
+    
+    return acc;
+  }, {} as Record<FeatureGroup, Array<{ id: AppPage; label: string; icon: typeof LayoutDashboard; description?: string; adminOnly?: boolean; opsOnly?: boolean }>>);
 
   return (
     <div className="flex h-screen bg-gray-50 overflow-hidden">
@@ -50,26 +59,37 @@ export const Layout: React.FC<LayoutProps> = ({ children, activePage, onNavigate
           </div>
         </div>
 
-        <nav className="flex-1 p-4 space-y-2 overflow-y-auto">
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            const isActive = activePage === item.id;
-            return (
-              <button
-                key={item.id}
-                onClick={() => onNavigate(item.id as AppPage)}
-                className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors duration-200 ${
-                  isActive 
-                    ? 'bg-indigo-600 text-white shadow-lg' 
-                    : 'text-slate-400 hover:bg-slate-800 hover:text-white'
-                }`}
-                title={item.description}
-              >
-                <Icon size={20} />
-                <span className="font-medium">{item.label}</span>
-              </button>
-            );
-          })}
+        <nav className="flex-1 p-4 space-y-6 overflow-y-auto">
+          {/* Render grouped navigation with visual separators */}
+          {Object.entries(groupedNavItems).map(([group, items]) => (
+            <div key={group} className="space-y-2">
+              {/* Group Header */}
+              <div className="px-3 py-1 text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                {GROUP_LABELS[group as FeatureGroup]}
+              </div>
+              
+              {/* Group Items */}
+              {items.map((item) => {
+                const Icon = item.icon;
+                const isActive = activePage === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => onNavigate(item.id as AppPage)}
+                    className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors duration-200 ${
+                      isActive 
+                        ? 'bg-indigo-600 text-white shadow-lg' 
+                        : 'text-slate-400 hover:bg-slate-800 hover:text-white'
+                    }`}
+                    title={item.description}
+                  >
+                    <Icon size={20} />
+                    <span className="font-medium">{item.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          ))}
         </nav>
 
         <div className="p-4 border-t border-slate-700">

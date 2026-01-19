@@ -5,7 +5,7 @@ import {
   getSubtaskTypes,
   clearCache,
 } from '../mockData';
-import { Sparkles, Loader2, Plus, Copy, X } from 'lucide-react';
+import { Sparkles, Loader2, Plus, Copy, X, Shield, Save, XCircle, Search, Trash2, Edit } from 'lucide-react';
 import { Snapshot, Rule, Fact, PkgEnv, PkgEngine, PkgConditionType, PkgOperator, PkgRelation, SubtaskType } from '../types';
 import {
   createSnapshot,
@@ -17,6 +17,7 @@ import {
 import { createFact } from '../services/factService';
 import { createRule } from '../services/ruleService';
 import { generateFactFromNaturalLanguage, generateRuleFromNaturalLanguage } from '../services/geminiService';
+import { setupDesignGovernance } from '../services/designGovernanceSetup';
 
 /**
  * PolicyStudio - Policy Authoring & Evolution
@@ -93,6 +94,19 @@ export const PolicyStudio: React.FC = () => {
   });
   const [creatingRule, setCreatingRule] = useState(false);
   const [ruleMessage, setRuleMessage] = useState<string | null>(null);
+  
+  // AI Assistant: Draft rule preview (from PolicyFactory)
+  const [draftRule, setDraftRule] = useState<Rule | null>(null);
+  const [savingDraft, setSavingDraft] = useState(false);
+  const [originalPrompt, setOriginalPrompt] = useState('');
+
+  // Design governance setup state
+  const [settingUpDesignGov, setSettingUpDesignGov] = useState(false);
+  const [designGovMessage, setDesignGovMessage] = useState<string | null>(null);
+
+  // Rules list view state
+  const [ruleSearch, setRuleSearch] = useState('');
+  const [selectedRuleSnapshotId, setSelectedRuleSnapshotId] = useState<number | null>(null);
 
   /** -----------------------------
    * Data loading
@@ -135,6 +149,29 @@ export const PolicyStudio: React.FC = () => {
   );
 
   const activeSnapshotId = activeSnapshot?.id ?? null;
+
+  // Filtered rules for list view
+  const filteredRules = useMemo(() => {
+    const snapshotId = selectedRuleSnapshotId ?? activeSnapshotId;
+    const list = snapshotId ? rules.filter(r => r.snapshotId === snapshotId) : rules;
+    const q = ruleSearch.trim().toLowerCase();
+    if (!q) return list;
+
+    return list.filter(r => {
+      const hay = [
+        r.ruleName,
+        String(r.engine),
+        String(r.priority),
+        ...(r.conditions || []).map(c => `${c.conditionKey} ${c.operator} ${c.value || ''}`),
+        ...(r.emissions || []).map(e => `${e.relationshipType} ${e.subtaskName || e.subtaskTypeId}`),
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+
+      return hay.includes(q);
+    });
+  }, [rules, selectedRuleSnapshotId, activeSnapshotId, ruleSearch]);
 
   /** -----------------------------
    * Snapshot create / clone
@@ -227,6 +264,38 @@ export const PolicyStudio: React.FC = () => {
       console.error(e);
       setSnapshotMessage(`❌ Activate latest failed: ${e.message || e}`);
       setTimeout(() => setSnapshotMessage(null), 6000);
+    }
+  };
+
+  /** -----------------------------
+   * Design Governance Setup
+   * ------------------------------*/
+
+  const handleSetupDesignGovernance = async () => {
+    const targetSnapshotId = activeSnapshotId || snapshots[0]?.id;
+    if (!targetSnapshotId) {
+      setDesignGovMessage('❌ Please select or create a snapshot first');
+      setTimeout(() => setDesignGovMessage(null), 3000);
+      return;
+    }
+
+    setSettingUpDesignGov(true);
+    setDesignGovMessage(null);
+
+    try {
+      const result = await setupDesignGovernance(targetSnapshotId);
+      
+      if (result.success) {
+        setDesignGovMessage(`✅ ${result.message}`);
+        await reloadData(); // Reload to show new subtask types and rules
+        setTimeout(() => setDesignGovMessage(null), 5000);
+      } else {
+        setDesignGovMessage(`❌ ${result.message}`);
+      }
+    } catch (error: any) {
+      setDesignGovMessage(`❌ Error: ${error.message || String(error)}`);
+    } finally {
+      setSettingUpDesignGov(false);
     }
   };
 
@@ -371,6 +440,8 @@ export const PolicyStudio: React.FC = () => {
     setRulePrompt('');
     setRuleModalStep('prompt');
     setRuleMessage(null);
+    setDraftRule(null);
+    setOriginalPrompt('');
     setShowAddRuleModal(true);
   };
 
@@ -411,6 +482,35 @@ export const PolicyStudio: React.FC = () => {
           params: JSON.stringify(em.params || {}),
         };
       });
+      // Create draft rule for preview (PolicyFactory pattern)
+      const draftId = `draft-${Date.now()}`;
+      const draft: Rule = {
+        id: draftId,
+        snapshotId: newRule.snapshotId!,
+        ruleName: generatedRule.ruleName,
+        priority: generatedRule.priority,
+        engine: generatedRule.engine as PkgEngine,
+        disabled: false,
+        conditions: generatedRule.conditions.map(c => ({
+          ruleId: draftId,
+          conditionType: c.conditionType as PkgConditionType,
+          conditionKey: c.conditionKey,
+          operator: c.operator as PkgOperator,
+          value: c.value || '',
+        })),
+        emissions: emissionsWithIds.map(e => ({
+          ruleId: draftId,
+          subtaskTypeId: e.subtaskTypeId,
+          relationshipType: e.relationshipType,
+          params: e.params ? JSON.parse(e.params) : undefined,
+        })),
+        ruleSource: generatedRule.ruleSource || '',
+      };
+      
+      setDraftRule(draft);
+      setOriginalPrompt(rulePrompt);
+      
+      // Also populate form for manual editing
       setNewRule({
         snapshotId: newRule.snapshotId,
         ruleName: generatedRule.ruleName,
@@ -425,7 +525,7 @@ export const PolicyStudio: React.FC = () => {
         })),
         emissions: emissionsWithIds,
       });
-      setRuleMessage('✅ Rule generated! Review and edit if needed.');
+      setRuleMessage('✅ Rule generated! Review draft below or edit in form.');
       setRuleModalStep('form');
     } catch (error: any) {
       setRuleMessage(`❌ Error: ${error.message}`);
@@ -434,7 +534,111 @@ export const PolicyStudio: React.FC = () => {
     }
   };
 
+  // Save draft rule directly (PolicyFactory pattern)
+  const handleSaveDraft = async () => {
+    if (!draftRule || !draftRule.snapshotId) return;
+
+    if (!draftRule.ruleName?.trim()) {
+      setRuleMessage('❌ Draft missing ruleName.');
+      return;
+    }
+    if (!draftRule.conditions?.length) {
+      setRuleMessage('❌ Draft needs at least one condition.');
+      return;
+    }
+    if (!draftRule.emissions?.length) {
+      setRuleMessage('❌ Draft needs at least one emission.');
+      return;
+    }
+
+    setSavingDraft(true);
+    setRuleMessage(null);
+
+    try {
+      const snapshotSubtaskTypes = subtaskTypes.filter(st => st.snapshotId === draftRule.snapshotId);
+
+      // Map emissions: ensure subtaskTypeId is present
+      const mappedEmissions = draftRule.emissions.map((e, idx) => {
+        let subtaskTypeId = e.subtaskTypeId;
+
+        if (!subtaskTypeId && e.subtaskName) {
+          const found = snapshotSubtaskTypes.find(st => st.name === e.subtaskName);
+          if (found) {
+            subtaskTypeId = found.id;
+          } else {
+            throw new Error(
+              `Emission ${idx + 1}: Could not find subtask type "${e.subtaskName}" for snapshot ${draftRule.snapshotId}.`
+            );
+          }
+        }
+
+        if (!subtaskTypeId) {
+          throw new Error(`Emission ${idx + 1}: subtaskTypeId is required.`);
+        }
+
+        return {
+          subtaskTypeId,
+          relationshipType: e.relationshipType,
+          params: e.params,
+        };
+      });
+
+      // Generate rule source from original prompt if available
+      const generateRuleSource = (rule: Rule): string => {
+        if (originalPrompt.trim()) {
+          return `Generated from: "${originalPrompt.trim()}"`;
+        }
+        const conditionsStr = rule.conditions
+          .map(c => `${c.conditionKey} ${c.operator} ${c.value || 'EXISTS'}`)
+          .join(' AND ');
+        const emissionsStr = rule.emissions
+          .map(e => `${e.relationshipType} ${e.subtaskName || e.subtaskTypeId || 'subtask'}`)
+          .join(', ');
+        return `Rule: When ${conditionsStr}, then ${emissionsStr}`;
+      };
+
+      const ruleSource = draftRule.ruleSource?.trim() || generateRuleSource(draftRule);
+
+      const created = await createRule({
+        snapshotId: draftRule.snapshotId,
+        ruleName: draftRule.ruleName,
+        priority: draftRule.priority ?? 100,
+        engine: draftRule.engine,
+        ruleSource,
+        conditions: draftRule.conditions.map(c => ({
+          conditionType: c.conditionType,
+          conditionKey: c.conditionKey,
+          operator: c.operator,
+          value: c.value,
+        })),
+        emissions: mappedEmissions,
+      });
+
+      setRules(prev => [...prev, created]);
+      setDraftRule(null);
+      setRulePrompt('');
+      setOriginalPrompt('');
+      setRuleMessage(`✅ Saved rule "${created.ruleName}".`);
+      
+      setTimeout(() => {
+        setShowAddRuleModal(false);
+        setRuleModalStep('prompt');
+        setRuleMessage(null);
+      }, 2000);
+    } catch (e: any) {
+      setRuleMessage(`❌ ${e.message || 'Failed to save rule.'}`);
+    } finally {
+      setSavingDraft(false);
+    }
+  };
+
   const handleCreateRule = async () => {
+    // If draft exists, use it; otherwise use form data
+    if (draftRule) {
+      await handleSaveDraft();
+      return;
+    }
+
     if (!newRule.ruleName.trim() || !newRule.snapshotId) {
       setRuleMessage('❌ Rule name and snapshot are required');
       return;
@@ -1060,6 +1264,77 @@ export const PolicyStudio: React.FC = () => {
               </div>
             ) : (
               <div className="p-6 space-y-4">
+                {/* Draft Preview (PolicyFactory pattern) */}
+                {draftRule && (
+                  <div className="bg-gradient-to-r from-indigo-50 to-blue-50 border border-indigo-200 rounded-lg p-4 mb-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs font-bold text-indigo-700 uppercase mb-1">Draft Rule Preview</div>
+                        <div className="font-semibold text-gray-900 truncate">{draftRule.ruleName}</div>
+                        <div className="text-xs text-gray-500 mt-1">
+                          engine: <span className="font-mono">{String(draftRule.engine)}</span> · priority:{' '}
+                          <span className="font-mono">{draftRule.priority}</span>
+                        </div>
+                        
+                        <div className="mt-3">
+                          <div className="text-xs font-semibold text-gray-700 mb-1">
+                            Conditions ({draftRule.conditions.length})
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            {draftRule.conditions.map((c, i) => (
+                              <span key={i} className="bg-white px-2 py-1 rounded text-xs border border-gray-200">
+                                {c.conditionKey} <span className="font-bold">{c.operator}</span> {c.value || 'EXISTS'}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="mt-3">
+                          <div className="text-xs font-semibold text-gray-700 mb-1">
+                            Emissions ({draftRule.emissions.length})
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            {draftRule.emissions.map((e, i) => {
+                              const subtaskType = subtaskTypes.find(st => st.id === e.subtaskTypeId);
+                              return (
+                                <span
+                                  key={i}
+                                  className="bg-white text-blue-700 px-2 py-1 rounded text-xs border border-blue-200"
+                                >
+                                  {e.relationshipType} → {subtaskType?.name || e.subtaskTypeId}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => {
+                            setDraftRule(null);
+                            setRuleMessage(null);
+                          }}
+                          className="inline-flex items-center px-2 py-2 text-sm rounded-md border bg-white hover:bg-gray-50 text-gray-700"
+                          title="Discard draft"
+                        >
+                          <XCircle className="h-4 w-4" />
+                        </button>
+                        <button
+                          onClick={handleSaveDraft}
+                          disabled={savingDraft}
+                          className={`inline-flex items-center px-3 py-2 text-sm rounded-md text-white ${
+                            savingDraft ? 'bg-gray-400' : 'bg-emerald-600 hover:bg-emerald-700'
+                          }`}
+                        >
+                          <Save className="h-4 w-4 mr-2" />
+                          {savingDraft ? 'Saving…' : 'Save Draft'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -1196,6 +1471,7 @@ export const PolicyStudio: React.FC = () => {
                     onClick={() => {
                       setRuleModalStep('prompt');
                       setRuleMessage(null);
+                      setDraftRule(null);
                     }}
                     className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
                   >
@@ -1206,29 +1482,54 @@ export const PolicyStudio: React.FC = () => {
                       onClick={() => {
                         setShowAddRuleModal(false);
                         setRuleModalStep('prompt');
+                        setDraftRule(null);
                       }}
                       className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
                     >
                       Cancel
                     </button>
-                    <button
-                      onClick={handleCreateRule}
-                      disabled={creatingRule || !newRule.ruleName.trim() || !newRule.snapshotId || newRule.conditions.length === 0 || newRule.emissions.length === 0}
-                      className={`px-4 py-2 text-sm font-medium text-white rounded-md ${
-                        creatingRule || !newRule.ruleName.trim() || !newRule.snapshotId || newRule.conditions.length === 0 || newRule.emissions.length === 0
-                          ? 'bg-gray-400 cursor-not-allowed'
-                          : 'bg-indigo-600 hover:bg-indigo-700'
-                      }`}
-                    >
-                      {creatingRule ? (
-                        <>
-                          <Loader2 className="h-4 w-4 inline animate-spin mr-2" />
-                          Creating...
-                        </>
-                      ) : (
-                        'Create Rule'
-                      )}
-                    </button>
+                    {draftRule ? (
+                      <button
+                        onClick={handleSaveDraft}
+                        disabled={savingDraft}
+                        className={`px-4 py-2 text-sm font-medium text-white rounded-md ${
+                          savingDraft
+                            ? 'bg-gray-400 cursor-not-allowed'
+                            : 'bg-emerald-600 hover:bg-emerald-700'
+                        }`}
+                      >
+                        {savingDraft ? (
+                          <>
+                            <Loader2 className="h-4 w-4 inline animate-spin mr-2" />
+                            Saving...
+                          </>
+                        ) : (
+                          <>
+                            <Save className="h-4 w-4 inline mr-2" />
+                            Save Draft
+                          </>
+                        )}
+                      </button>
+                    ) : (
+                      <button
+                        onClick={handleCreateRule}
+                        disabled={creatingRule || !newRule.ruleName.trim() || !newRule.snapshotId || newRule.conditions.length === 0 || newRule.emissions.length === 0}
+                        className={`px-4 py-2 text-sm font-medium text-white rounded-md ${
+                          creatingRule || !newRule.ruleName.trim() || !newRule.snapshotId || newRule.conditions.length === 0 || newRule.emissions.length === 0
+                            ? 'bg-gray-400 cursor-not-allowed'
+                            : 'bg-indigo-600 hover:bg-indigo-700'
+                        }`}
+                      >
+                        {creatingRule ? (
+                          <>
+                            <Loader2 className="h-4 w-4 inline animate-spin mr-2" />
+                            Creating...
+                          </>
+                        ) : (
+                          'Create Rule'
+                        )}
+                      </button>
+                    )}
                   </div>
                 </>
               )}
@@ -1237,8 +1538,19 @@ export const PolicyStudio: React.FC = () => {
         </div>
       )}
 
+      {/* Design Governance Setup Message */}
+      {designGovMessage && (
+        <div className={`mb-4 p-4 rounded-lg ${
+          designGovMessage.startsWith('✅') 
+            ? 'bg-green-50 border border-green-200 text-green-800' 
+            : 'bg-red-50 border border-red-200 text-red-800'
+        }`}>
+          <p className="text-sm">{designGovMessage}</p>
+        </div>
+      )}
+
       {/* Quick Actions */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <button
           onClick={() => handleOpenNewSnapshotModal('create')}
           className="bg-white border border-gray-200 rounded-lg p-6 hover:shadow-md transition-shadow text-left"
@@ -1283,6 +1595,30 @@ export const PolicyStudio: React.FC = () => {
             </div>
           </div>
         </button>
+
+        <button
+          onClick={handleSetupDesignGovernance}
+          disabled={settingUpDesignGov || !activeSnapshotId}
+          className={`bg-white border border-gray-200 rounded-lg p-6 hover:shadow-md transition-shadow text-left ${
+            settingUpDesignGov || !activeSnapshotId ? 'opacity-50 cursor-not-allowed' : ''
+          }`}
+        >
+          <div className="flex items-center space-x-3">
+            <div className="p-3 bg-purple-100 rounded-lg">
+              {settingUpDesignGov ? (
+                <Loader2 className="h-6 w-6 text-purple-600 animate-spin" />
+              ) : (
+                <Shield className="h-6 w-6 text-purple-600" />
+              )}
+            </div>
+            <div>
+              <h3 className="font-semibold text-gray-900">Setup Design Governance</h3>
+              <p className="text-sm text-gray-500 mt-1">
+                {settingUpDesignGov ? 'Setting up...' : 'Register subtask types & rules'}
+              </p>
+            </div>
+          </div>
+        </button>
       </div>
 
       {/* Summary Stats */}
@@ -1301,6 +1637,142 @@ export const PolicyStudio: React.FC = () => {
             <div className="text-2xl font-bold text-gray-900">{facts.filter(f => f.status === 'active').length}</div>
             <div className="text-sm text-gray-500">Active Facts</div>
           </div>
+        </div>
+      </div>
+
+      {/* Rules List View */}
+      <div className="bg-white shadow sm:rounded-md flex-1 overflow-hidden border border-gray-100 mt-6">
+        <div className="p-4 border-b border-gray-200 flex items-center gap-2">
+          <div className="relative flex-1">
+            <Search className="h-4 w-4 text-gray-400 absolute left-3 top-3" />
+            <input
+              value={ruleSearch}
+              onChange={(e) => setRuleSearch(e.target.value)}
+              placeholder="Search rule name, conditions, emissions…"
+              className="w-full pl-9 pr-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs font-semibold text-gray-500 uppercase">Snapshot:</label>
+            <select
+              value={selectedRuleSnapshotId ?? activeSnapshotId ?? ''}
+              onChange={(e) => setSelectedRuleSnapshotId(e.target.value ? Number(e.target.value) : null)}
+              className="px-3 py-2 text-sm border-gray-300 rounded-md border focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            >
+              <option value="">All Snapshots</option>
+              {snapshots.filter(s => s.env === selectedEnv).map(s => (
+                <option key={s.id} value={s.id}>
+                  {s.version} {s.isActive ? '★' : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="text-xs text-gray-500 whitespace-nowrap">{filteredRules.length} rule(s)</div>
+        </div>
+
+        <div className="overflow-y-auto max-h-[600px]">
+          <ul className="divide-y divide-gray-200">
+            {filteredRules.map(rule => (
+              <li key={rule.id}>
+                <div className="px-4 py-4 sm:px-6 hover:bg-gray-50 transition-colors">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium text-indigo-600 truncate">{rule.ruleName}</p>
+                      <p className="text-xs text-gray-500 mt-1">
+                        engine: <span className="font-mono">{String(rule.engine)}</span> · priority:{' '}
+                        <span className="font-mono">{rule.priority}</span>
+                        {rule.disabled ? <span className="ml-2 text-red-600 font-semibold">DISABLED</span> : null}
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => {
+                          // Load rule into edit form
+                          setNewRule({
+                            snapshotId: rule.snapshotId,
+                            ruleName: rule.ruleName,
+                            priority: rule.priority,
+                            engine: rule.engine,
+                            ruleSource: rule.ruleSource || '',
+                            conditions: rule.conditions.map(c => ({
+                              conditionType: c.conditionType,
+                              conditionKey: c.conditionKey,
+                              operator: c.operator,
+                              value: c.value || '',
+                            })),
+                            emissions: rule.emissions.map(e => ({
+                              subtaskTypeId: e.subtaskTypeId,
+                              relationshipType: e.relationshipType,
+                              params: JSON.stringify(e.params || {}),
+                            })),
+                          });
+                          setRulePrompt('');
+                          setDraftRule(null);
+                          setRuleModalStep('form');
+                          setShowAddRuleModal(true);
+                        }}
+                        className="text-indigo-400 hover:text-indigo-600"
+                        title="Edit rule"
+                      >
+                        <Edit className="h-4 w-4" />
+                      </button>
+                      <button
+                        onClick={() => {
+                          if (window.confirm(`Delete rule "${rule.ruleName}"?`)) {
+                            setRules(prev => prev.filter(r => r.id !== rule.id));
+                            // TODO: Add backend delete endpoint call
+                          }
+                        }}
+                        className="text-red-400 hover:text-red-600"
+                        title="Delete rule"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 space-y-2">
+                    <div className="text-sm text-gray-500">
+                      <span className="font-semibold mr-2">Conditions:</span>
+                      <div className="mt-1 flex flex-wrap gap-2">
+                        {rule.conditions.map((c, i) => (
+                          <span key={i} className="bg-gray-100 px-2 py-0.5 rounded text-xs">
+                            {c.conditionKey} <span className="font-bold">{c.operator}</span> {c.value || 'EXISTS'}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="text-sm text-gray-500">
+                      <span className="font-semibold mr-2">Emissions:</span>
+                      <div className="mt-1 flex flex-wrap gap-2">
+                        {rule.emissions.map((e, i) => {
+                          const subtaskType = subtaskTypes.find(st => st.id === e.subtaskTypeId);
+                          return (
+                            <span
+                              key={i}
+                              className="bg-blue-50 text-blue-700 px-2 py-0.5 rounded text-xs border border-blue-100"
+                            >
+                              {e.relationshipType} → {subtaskType?.name || e.subtaskTypeId}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </li>
+            ))}
+
+            {filteredRules.length === 0 && (
+              <li className="p-10 text-center text-gray-400">
+                {ruleSearch.trim() || selectedRuleSnapshotId
+                  ? 'No rules found matching your search/filter.'
+                  : 'No rules found. Create your first rule using the "Create Rule" button above.'}
+              </li>
+            )}
+          </ul>
         </div>
       </div>
     </div>

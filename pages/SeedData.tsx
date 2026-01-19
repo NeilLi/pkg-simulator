@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useMemo, useRef, useState, useEffect } from "react";
 import {
   Download,
   XCircle,
@@ -10,8 +10,14 @@ import {
   Brain,
   Zap,
   Search,
+  AlertTriangle,
+  Clock,
+  Workflow,
+  Eye,
 } from "lucide-react";
 import { seedDataService, SeedResult } from "../src/services/seedDataService";
+import { validateRulesWithDigitalTwin } from "../services/digitalTwinService";
+import { Snapshot, Rule } from "../types";
 
 const DEFAULT_DB_PROXY = "http://localhost:3001";
 
@@ -27,6 +33,28 @@ type NormalizedSeed = SeedResult & {
   reason?: string;
   memoryTierIntended?: "event_working" | "knowledge_base";
   written?: boolean;
+  // Step 5: Digital Twin Critic
+  criticReport?: {
+    passed: boolean;
+    issues: Array<{
+      severity: "critical" | "warning" | "info";
+      issue: string;
+      recommendation?: string;
+    }>;
+    validationScore: number;
+  };
+  // Step 6: Temporal Awareness
+  validity?: {
+    from: string; // ISO timestamp
+    to?: string; // ISO timestamp (null = indefinite)
+  };
+  // Emission Blueprinting
+  emissions?: Array<{
+    subtaskName: string;
+    relationshipType: "EMITS" | "ORDERS" | "GATE";
+    params?: any;
+    position?: number;
+  }>;
 };
 
 function clamp(n: number, min: number, max: number) {
@@ -65,12 +93,33 @@ function normalizeSeed(r: SeedResult): NormalizedSeed {
   const title = (r as any)?.ticket?.title || (r as any)?.title || (r as any)?.name;
   const id = String((r as any)?.id || (r as any)?.ticketId || (r as any)?.taskId || "");
 
+  // Step 6: Capture temporal validity from Migration 016 integration
+  const temporalContext = (r as any)?.temporalContext;
+  const validity = temporalContext ? {
+    from: temporalContext.from || new Date().toISOString(),
+    to: temporalContext.to || undefined,
+  } : {
+    from: new Date().toISOString(),
+    to: undefined,
+  };
+  
+  // Capture subtask emissions from policy decision (Migration 013)
+  const emissions = (r as any)?.policyDecision?.matchedRules?.[0]?.emissions || 
+                    (r as any)?.policyDecision?.emissions || 
+                    [];
+
+  // Step 5: Critic report (will be populated after Digital Twin validation)
+  const criticReport = (r as any)?.criticReport;
+
   return {
     ...r,
     id: id || undefined,
     title: title || undefined,
     allowed,
     reason,
+    validity, // For Step 6: Temporal Awareness
+    emissions, // For Emission Blueprinting
+    criticReport, // For Step 5: Digital Twin Critic
     written: Boolean((r as any)?.written || (r as any)?.appended || (r as any)?.stored),
   };
 }
@@ -102,6 +151,13 @@ export const SeedDataEnhanced: React.FC = () => {
   const [query, setQuery] = useState("");
   const [showOnlyAllowed, setShowOnlyAllowed] = useState(false);
 
+  // Step 5 & 6: Snapshot and rules for Digital Twin & Temporal evaluation
+  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [rules, setRules] = useState<Rule[]>([]);
+  
+  // Emission Blueprint modal
+  const [selectedBlueprint, setSelectedBlueprint] = useState<NormalizedSeed | null>(null);
+
   const abortRef = useRef<AbortController | null>(null);
 
   const summary = useMemo(() => (results.length ? formatSummary(results) : ""), [results]);
@@ -115,6 +171,32 @@ export const SeedDataEnhanced: React.FC = () => {
     }
     return out;
   }, [results, showOnlyAllowed, query]);
+
+  // Load active snapshot and rules on mount
+  useEffect(() => {
+    loadActiveSnapshot();
+  }, [dbProxyUrl]);
+  
+  const loadActiveSnapshot = async () => {
+    try {
+      const res = await fetch(`${dbProxyUrl}/api/snapshots`);
+      if (res.ok) {
+        const snapshots = await res.json();
+        const active = snapshots.find((s: Snapshot) => s.isActive) || snapshots[0];
+        if (active) {
+          setSnapshot(active);
+          // Load rules for this snapshot
+          const rulesRes = await fetch(`${dbProxyUrl}/api/rules?snapshotId=${active.id}`);
+          if (rulesRes.ok) {
+            const rulesData = await rulesRes.json();
+            setRules(rulesData);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error loading snapshot:', error);
+    }
+  };
 
   const appendLog = (message: string) => {
     setLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${message}`]);
@@ -180,6 +262,40 @@ export const SeedDataEnhanced: React.FC = () => {
           writeMode === "event_working" || writeMode === "event_then_approve"
             ? "event_working"
             : "event_working";
+        
+        // Step 5: Run Digital Twin validation if snapshot and rules are available
+        if (snapshot && rules.length > 0 && n.allowed && n.emissions && n.emissions.length > 0) {
+          try {
+            // Create a mock rule from the seed for validation
+            const mockRule: Rule = {
+              id: `seed-${n.seedHash}`,
+              snapshotId: snapshot.id!,
+              ruleName: `Seed: ${n.title || 'Untitled'}`,
+              priority: 100,
+              engine: 'wasm' as any,
+              disabled: false,
+              conditions: [],
+              emissions: n.emissions.map((e: any) => ({
+                ruleId: `seed-${n.seedHash}`,
+                subtaskTypeId: `mock-${e.subtaskName}`,
+                subtaskName: e.subtaskName,
+                relationshipType: e.relationshipType as any,
+                params: e.params,
+              })),
+            };
+            
+            const criticResult = await validateRulesWithDigitalTwin([mockRule], snapshot);
+            n.criticReport = criticResult;
+            
+            if (!criticResult.passed) {
+              appendLog(`⚠️ Critic flagged seed "${n.title}": ${criticResult.issues[0]?.issue || 'Hardware constraint violation'}`);
+            }
+          } catch (error) {
+            console.warn('Digital Twin validation failed for seed:', error);
+            // Continue without critic report
+          }
+        }
+        
         normalized.push(n);
         setProgress((p) => ({ ...p, done: i + 1 }));
       }
@@ -220,19 +336,92 @@ export const SeedDataEnhanced: React.FC = () => {
     }
   };
 
-  // Client-side “approval” toggle (wire to backend promotion endpoint later)
+  // Approve & Promote: Wire to backend promotion endpoint
+  const handleApproveAndPromote = async (seed: NormalizedSeed) => {
+    if (!seed.seedHash || !seed.id) {
+      appendLog(`⚠️ Cannot promote seed: missing seedHash or id`);
+      return;
+    }
+    
+    if (!seed.allowed) {
+      appendLog(`⚠️ Cannot promote blocked seed: ${seed.title || seed.seedHash}`);
+      return;
+    }
+    
+    // Check if critic flagged critical issues
+    if (seed.criticReport && !seed.criticReport.passed) {
+      const criticalIssues = seed.criticReport.issues.filter(i => i.severity === 'critical');
+      if (criticalIssues.length > 0) {
+        appendLog(`⚠️ Cannot promote seed with critical hardware violations: ${seed.title || seed.seedHash}`);
+        return;
+      }
+    }
+    
+    try {
+      appendLog(`Promoting seed "${seed.title || seed.seedHash}" to knowledge_base...`);
+      
+      const response = await fetch(`${dbProxyUrl}/api/memory/promote`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          taskId: seed.id,
+          seedHash: seed.seedHash,
+          label: 'wearable.ticket',
+          actor: 'user', // Could be enhanced to track actual user
+          snapshotId: snapshot?.id || null,
+          deleteSource: true // Clean up event_working after promotion
+        })
+      });
+      
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || `Promotion failed: ${response.statusText}`);
+      }
+      
+      const result = await response.json();
+      
+      // Update UI state to reflect promotion
+      setResults((prev) =>
+        prev.map((x) =>
+          x.seedHash === seed.seedHash
+            ? {
+                ...x,
+                memoryTierIntended: 'knowledge_base' as const,
+                written: true,
+                id: result.nodeId, // Update to new node_id
+              }
+            : x
+        )
+      );
+      
+      appendLog(`✅ Successfully promoted seed to knowledge_base as node ${result.nodeId}`);
+    } catch (error: any) {
+      appendLog(`❌ Promotion failed: ${error?.message || String(error)}`);
+    }
+  };
+  
+  // Client-side "approval" toggle (for UI state only, actual promotion via handleApproveAndPromote)
   const toggleApprove = (seedHash?: string) => {
     if (!seedHash) return;
-    setResults((prev) =>
-      prev.map((x) =>
-        x.seedHash === seedHash
-          ? {
-              ...x,
-              memoryTierIntended: x.memoryTierIntended === "knowledge_base" ? "event_working" : "knowledge_base",
-            }
-          : x
-      )
-    );
+    const seed = results.find(r => r.seedHash === seedHash);
+    if (seed) {
+      // If toggling to knowledge_base, trigger actual promotion
+      if (seed.memoryTierIntended !== 'knowledge_base') {
+        handleApproveAndPromote(seed);
+      } else {
+        // Toggling back to event_working (just UI state change)
+        setResults((prev) =>
+          prev.map((x) =>
+            x.seedHash === seedHash
+              ? {
+                  ...x,
+                  memoryTierIntended: 'event_working' as const,
+                }
+              : x
+          )
+        );
+      }
+    }
   };
 
   const TierPill = ({ tier }: { tier?: string }) => {
@@ -247,6 +436,211 @@ export const SeedDataEnhanced: React.FC = () => {
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-50 text-amber-700 border border-amber-200">
         <Zap className="h-3 w-3" /> event_working
       </span>
+    );
+  };
+
+  // Step 5: Critic Report Component
+  const CriticIndicator = ({ seed }: { seed: NormalizedSeed }) => {
+    if (!seed.criticReport) return null;
+    
+    const { passed, issues, validationScore } = seed.criticReport;
+    const hasCriticalIssues = issues.some(i => i.severity === "critical");
+    
+    return (
+      <div className="relative group">
+        <button
+          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border ${
+            hasCriticalIssues
+              ? "bg-red-50 text-red-700 border-red-200"
+              : passed
+              ? "bg-green-50 text-green-700 border-green-200"
+              : "bg-yellow-50 text-yellow-700 border-yellow-200"
+          }`}
+          title={`Critic Score: ${(validationScore * 100).toFixed(0)}%`}
+        >
+          <AlertTriangle className="h-3 w-3" />
+          {hasCriticalIssues ? "Critical" : passed ? "Valid" : "Warning"}
+        </button>
+        
+        {/* Tooltip */}
+        <div className="absolute left-0 bottom-full mb-2 hidden group-hover:block z-50 w-64 bg-gray-900 text-white text-xs rounded-lg p-3 shadow-xl">
+          <div className="font-semibold mb-2">Digital Twin Validation</div>
+          <div className="mb-2">Score: {(validationScore * 100).toFixed(1)}%</div>
+          {issues.length > 0 && (
+            <div className="space-y-1">
+              {issues.slice(0, 3).map((issue, idx) => (
+                <div key={idx} className={`text-xs ${
+                  issue.severity === "critical" ? "text-red-300" :
+                  issue.severity === "warning" ? "text-yellow-300" :
+                  "text-gray-300"
+                }`}>
+                  • {issue.issue}
+                  {issue.recommendation && (
+                    <div className="text-gray-400 ml-2 mt-0.5">→ {issue.recommendation}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // Step 6: Temporal Validity Component
+  const ValidityIndicator = ({ seed }: { seed: NormalizedSeed }) => {
+    if (!seed.validity) return <span className="text-xs text-gray-400">—</span>;
+    
+    const { from, to } = seed.validity;
+    const now = new Date();
+    const fromDate = new Date(from);
+    const toDate = to ? new Date(to) : null;
+    
+    if (toDate) {
+      const totalMs = toDate.getTime() - fromDate.getTime();
+      const elapsedMs = now.getTime() - fromDate.getTime();
+      const remainingMs = toDate.getTime() - now.getTime();
+      const progress = Math.max(0, Math.min(100, (elapsedMs / totalMs) * 100));
+      
+      const hoursRemaining = remainingMs / (1000 * 60 * 60);
+      const isExpired = remainingMs < 0;
+      const isCritical = hoursRemaining > 0 && hoursRemaining < 1;
+      
+      return (
+        <div className="space-y-1">
+          <div className="flex items-center gap-2 text-xs">
+            <Clock className={`h-3 w-3 ${isExpired ? "text-red-500" : isCritical ? "text-yellow-500" : "text-gray-400"}`} />
+            <span className={isExpired ? "text-red-600" : isCritical ? "text-yellow-600" : "text-gray-600"}>
+              {isExpired ? "Expired" : isCritical ? `${Math.round(hoursRemaining * 60)}m left` : `${Math.round(hoursRemaining)}h left`}
+            </span>
+          </div>
+          <div className="w-full bg-gray-200 rounded-full h-1.5">
+            <div
+              className={`h-1.5 rounded-full ${
+                isExpired ? "bg-red-500" : isCritical ? "bg-yellow-500" : "bg-blue-500"
+              }`}
+              style={{ width: `${Math.max(0, Math.min(100, progress))}%` }}
+            />
+          </div>
+          <div className="text-xs text-gray-500">
+            {fromDate.toLocaleDateString()} → {toDate.toLocaleDateString()}
+          </div>
+        </div>
+      );
+    }
+    
+    // Indefinite validity
+    return (
+      <div className="flex items-center gap-1 text-xs text-gray-600">
+        <CheckCircle2 className="h-3 w-3 text-green-500" />
+        <span>Indefinite</span>
+      </div>
+    );
+  };
+
+  // Emission Blueprint Component
+  const EmissionBlueprint = ({ emissions }: { emissions?: Array<any> }) => {
+    if (!emissions || emissions.length === 0) {
+      return <span className="text-xs text-gray-400">No emissions</span>;
+    }
+    
+    return (
+      <div className="flex flex-wrap gap-1">
+        {emissions.map((e, i) => (
+          <span
+            key={i}
+            className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${
+              e.relationshipType === "GATE"
+                ? "bg-red-100 border-red-200 text-red-700"
+                : e.relationshipType === "ORDERS"
+                ? "bg-blue-100 border-blue-200 text-blue-700"
+                : "bg-gray-100 border-gray-200 text-gray-700"
+            }`}
+            title={JSON.stringify(e.params || {}, null, 2)}
+          >
+            {e.relationshipType}
+          </span>
+        ))}
+      </div>
+    );
+  };
+
+  // Emission Blueprint Modal
+  const EmissionBlueprintModal = ({ seed, onClose }: { seed: NormalizedSeed | null; onClose: () => void }) => {
+    if (!seed || !seed.emissions || seed.emissions.length === 0) return null;
+    
+    return (
+      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={onClose}>
+        <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full m-4 max-h-[80vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+          <div className="p-6 border-b border-gray-200 flex items-center justify-between">
+            <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+              <Workflow className="h-5 w-5" />
+              Emission Blueprint: {seed.title || "Untitled Seed"}
+            </h3>
+            <button
+              onClick={onClose}
+              className="text-gray-400 hover:text-gray-600"
+            >
+              <XCircle className="h-5 w-5" />
+            </button>
+          </div>
+          
+          <div className="p-6 space-y-4">
+            <div className="text-sm text-gray-600 mb-4">
+              Task DAG (Directed Acyclic Graph) that would be triggered by this seed:
+            </div>
+            
+            <div className="space-y-3">
+              {seed.emissions
+                .sort((a, b) => (a.position || 0) - (b.position || 0))
+                .map((emission, idx) => (
+                  <div
+                    key={idx}
+                    className={`p-4 rounded-lg border-2 ${
+                      emission.relationshipType === "GATE"
+                        ? "border-red-300 bg-red-50"
+                        : emission.relationshipType === "ORDERS"
+                        ? "border-blue-300 bg-blue-50"
+                        : "border-gray-300 bg-gray-50"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-mono bg-white px-2 py-1 rounded">
+                          {idx + 1}
+                        </span>
+                        <span className={`font-semibold ${
+                          emission.relationshipType === "GATE" ? "text-red-700" :
+                          emission.relationshipType === "ORDERS" ? "text-blue-700" :
+                          "text-gray-700"
+                        }`}>
+                          {emission.relationshipType}
+                        </span>
+                      </div>
+                      <span className="text-sm font-medium text-gray-700">
+                        {emission.subtaskName}
+                      </span>
+                    </div>
+                    
+                    {emission.params && Object.keys(emission.params).length > 0 && (
+                      <div className="mt-2 text-xs">
+                        <div className="font-medium text-gray-600 mb-1">Parameters:</div>
+                        <pre className="bg-white p-2 rounded border border-gray-200 overflow-x-auto">
+                          {JSON.stringify(emission.params, null, 2)}
+                        </pre>
+                      </div>
+                    )}
+                  </div>
+                ))}
+            </div>
+            
+            <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-800">
+              <strong>Note:</strong> This blueprint shows the sequence of subtasks that would be executed if this seed is approved. 
+              GATE emissions block execution, ORDERS emissions trigger actions, and EMITS emissions send notifications.
+            </div>
+          </div>
+        </div>
+      </div>
     );
   };
 
@@ -471,13 +865,45 @@ export const SeedDataEnhanced: React.FC = () => {
                       )}
                     </td>
 
+                    {/* Step 5: Critic Indicator */}
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      {r.allowed ? (
+                        <CriticIndicator seed={r} />
+                      ) : (
+                        <span className="text-xs text-gray-400">—</span>
+                      )}
+                    </td>
+
                     <td className="px-6 py-4">
                       <div className="font-medium text-gray-900">{r.title || "Untitled ticket"}</div>
                       <div className="text-xs text-gray-500 font-mono">{r.id ? `id=${r.id}` : ""}</div>
                     </td>
 
+                    {/* Step 6: Temporal Validity */}
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <ValidityIndicator seed={r} />
+                    </td>
+
                     <td className="px-6 py-4 whitespace-nowrap">
                       <TierPill tier={r.memoryTierIntended} />
+                    </td>
+
+                    {/* Emission Blueprint */}
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      {r.emissions && r.emissions.length > 0 ? (
+                        <div className="flex items-center gap-2">
+                          <EmissionBlueprint emissions={r.emissions} />
+                          <button
+                            onClick={() => setSelectedBlueprint(r)}
+                            className="text-blue-600 hover:text-blue-800"
+                            title="View full blueprint"
+                          >
+                            <Eye className="h-4 w-4" />
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="text-xs text-gray-400">—</span>
+                      )}
                     </td>
 
                     <td className="px-6 py-4 whitespace-nowrap font-mono text-xs text-gray-600">
@@ -491,18 +917,33 @@ export const SeedDataEnhanced: React.FC = () => {
                     {writeMode === "event_then_approve" && (
                       <td className="px-6 py-4 whitespace-nowrap">
                         <button
-                          disabled={!r.allowed}
+                          disabled={!r.allowed || (r.criticReport && !r.criticReport.passed && r.criticReport.issues.some(i => i.severity === 'critical'))}
                           onClick={() => toggleApprove(r.seedHash)}
-                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold border ${
+                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors ${
                             !r.allowed
                               ? "bg-gray-50 text-gray-400 border-gray-200 cursor-not-allowed"
                               : r.memoryTierIntended === "knowledge_base"
                               ? "bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100"
                               : "bg-white text-gray-700 border-gray-300 hover:bg-gray-50"
                           }`}
-                          title="Toggle intended promotion tier (client-side)"
+                          title={
+                            !r.allowed
+                              ? "Cannot approve blocked seed"
+                              : r.criticReport && !r.criticReport.passed && r.criticReport.issues.some(i => i.severity === 'critical')
+                              ? "Cannot approve: Critical hardware violations detected"
+                              : r.memoryTierIntended === "knowledge_base"
+                              ? "Promoted to knowledge_base (click to undo)"
+                              : "Approve & Promote to knowledge_base"
+                          }
                         >
-                          {r.memoryTierIntended === "knowledge_base" ? "Approved → KB" : "Approve"}
+                          {r.memoryTierIntended === "knowledge_base" ? (
+                            <span className="flex items-center gap-1">
+                              <CheckCircle2 className="h-3 w-3" />
+                              Promoted
+                            </span>
+                          ) : (
+                            "Approve → KB"
+                          )}
                         </button>
                       </td>
                     )}

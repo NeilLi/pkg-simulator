@@ -5,11 +5,11 @@ import { Layout } from './components/Layout';
 import { Dashboard } from './pages/Dashboard';
 import { PolicyStudio } from './pages/PolicyStudio';
 import { InitializationPage } from './pages/InitializationPage';
-import { PolicyFactory } from './pages/PolicyFactory';
 import { Simulator } from './pages/Simulator';
 import { KnowledgeBase } from './pages/KnowledgeBase';
 import { ControlPlane } from './pages/ControlPlane';
 import { SeedData } from './pages/SeedData';
+import { GovernanceCockpit } from './pages/GovernanceCockpit';
 
 // Page Definitions
 import { AppPage } from './appPages';
@@ -32,7 +32,6 @@ const PAGE_COMPONENTS: Record<AppPage, React.ReactNode> = {
 
   // Authoring Plane
   [AppPage.POLICY_STUDIO]: <PolicyStudio />,
-  [AppPage.POLICY_FACTORY]: <PolicyFactory />,
 
   // Verification Plane
   [AppPage.SIMULATOR]: <Simulator />,
@@ -40,6 +39,9 @@ const PAGE_COMPONENTS: Record<AppPage, React.ReactNode> = {
   // Operational Plane
   [AppPage.CONTROL_PLANE]: <ControlPlane />,
   [AppPage.DASHBOARD]: <Dashboard />,
+  
+  // Governance Plane
+  [AppPage.GOVERNANCE_COCKPIT]: <GovernanceCockpit />,
 };
 
 /**

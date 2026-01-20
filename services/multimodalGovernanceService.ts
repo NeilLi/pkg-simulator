@@ -58,7 +58,7 @@ export async function processStreamFrame(
   frame: StreamFrame,
   designContext: DesignContext,
   snapshotId: number,
-  dbProxyUrl: string = "http://localhost:3001",
+  dbProxyUrl: string = "http://localhost:3011",
   apiKey?: string
 ): Promise<StreamGovernanceResult> {
   const startTime = Date.now();
@@ -224,7 +224,7 @@ export async function handleStreamGovernanceMessage(
     designContext?: DesignContext;
     snapshotId?: number;
   },
-  dbProxyUrl: string = "http://localhost:3001",
+  dbProxyUrl: string = "http://localhost:3011",
   apiKey?: string
 ): Promise<StreamGovernanceResult | null> {
   if (message.type === "frame" && message.frame && message.designContext && message.snapshotId) {

@@ -17,7 +17,7 @@ import { Pool } from 'pg';
 import crypto from 'crypto';
 
 const app = express();
-const PORT = process.env.DB_PROXY_PORT || 3001;
+const PORT = process.env.DB_PROXY_PORT || 3011;
 
 // CORS for Vite dev server (support both 3000 and 3010 for flexibility)
 app.use(cors({
@@ -581,31 +581,55 @@ app.post('/api/deployments', async (req, res) => {
       `, [previousActive.rows[0].id]);
     }
     
-    // Issue 3: Validate monotonic increase (unless explicitly rolling back)
-    // Check if deployment already exists for this snapshot + target + region + deployment_key
-    let existingCheck;
-    if (hasDeploymentKeyColumn) {
-      existingCheck = await client.query(
-        `SELECT id, percent, is_active 
-         FROM pkg_deployments 
-         WHERE snapshot_id = $1 AND target = $2 AND region = $3 
-           AND (deployment_key IS NULL OR deployment_key = $4)
-         ORDER BY activated_at DESC
-         LIMIT 1`,
-        [snapshotId, target, effectiveRegion, effectiveDeploymentKey]
-      );
-    } else {
-      existingCheck = await client.query(
-        `SELECT id, percent, is_active 
-         FROM pkg_deployments 
-         WHERE snapshot_id = $1 AND target = $2 AND region = $3 
-         ORDER BY activated_at DESC
-         LIMIT 1`,
-        [snapshotId, target, effectiveRegion]
-      );
+    // Issue 3: Check if deployment exists for SAME snapshot_id (for updating percent)
+    // CRITICAL: We should NEVER update snapshot_id - each snapshot must have its own deployment record
+    // If snapshot_id differs, we must deactivate old and create new (handling unique constraint)
+    let existingCheck = await client.query(
+      `SELECT id, snapshot_id, percent, is_active 
+       FROM pkg_deployments 
+       WHERE target = $1 AND region = $2 AND snapshot_id = $3
+       ORDER BY activated_at DESC
+       LIMIT 1`,
+      [target, effectiveRegion, snapshotId]
+    );
+    
+    // Also check for any existing deployment for this target+region (regardless of snapshot_id)
+    // This is needed to handle the unique constraint uq_pkg_deploy_lane(target, region)
+    let existingLaneCheck = await client.query(
+      `SELECT id, snapshot_id, percent, is_active 
+       FROM pkg_deployments 
+       WHERE target = $1 AND region = $2
+       ORDER BY activated_at DESC
+       LIMIT 1`,
+      [target, effectiveRegion]
+    );
+    
+    // Track if we're deploying a NEW snapshot (different from existing)
+    const isNewSnapshotDeployment = existingLaneCheck.rows.length > 0 && existingLaneCheck.rows[0].snapshot_id !== snapshotId;
+    
+    // If there's an existing deployment for a DIFFERENT snapshot_id, we need to handle it
+    // The unique constraint prevents multiple deployments per (target, region)
+    // So we must deactivate/delete the old one before creating new
+    if (isNewSnapshotDeployment) {
+      // Deactivate the old deployment (don't delete to preserve history)
+      await client.query(`
+        UPDATE pkg_deployments 
+        SET is_active = false
+        WHERE id = $1
+      `, [existingLaneCheck.rows[0].id]);
+      
+      // Delete the old deployment to make room for new one (due to unique constraint)
+      // This preserves data integrity - old snapshot's rules/facts remain intact
+      await client.query(`
+        DELETE FROM pkg_deployments 
+        WHERE id = $1
+      `, [existingLaneCheck.rows[0].id]);
+      
+      // Clear existingCheck since we're creating a new deployment
+      existingCheck = { rows: [] };
     }
     
-    // Fix 3: Server-side no-op detection
+    // Fix 3: Server-side no-op detection (only for same snapshot_id)
     if (existingCheck.rows.length > 0) {
       const existingPercent = existingCheck.rows[0].percent;
       const existingId = existingCheck.rows[0].id;
@@ -651,8 +675,9 @@ app.post('/api/deployments', async (req, res) => {
         }
       }
       
-      // Validate monotonic increase (unless explicitly rolling back)
-      if (!isRollback && percent < existingPercent) {
+      // Validate monotonic increase (unless explicitly rolling back OR deploying a new snapshot)
+      // When deploying a NEW snapshot, we allow starting from any percentage (even lower than old snapshot)
+      if (!isRollback && !isNewSnapshotDeployment && percent < existingPercent) {
         await client.query('ROLLBACK');
         return res.status(400).json({ 
           error: `Deployment percent cannot decrease from ${existingPercent}% to ${percent}% unless explicitly rolling back. Set isRollback=true to allow decrease.` 
@@ -662,38 +687,45 @@ app.post('/api/deployments', async (req, res) => {
     
     let deploymentId;
     if (existingCheck.rows.length > 0) {
-      // Update existing deployment
+      // Update existing deployment for SAME snapshot_id (only update percent, never snapshot_id)
       deploymentId = existingCheck.rows[0].id;
       
       // Build update query with optional validation_run_id
       // Check if validation_run_id column exists
-      let hasValidationRunIdColumn = false;
+      let hasValidationRunIdColumnLocal = false;
       try {
         const colCheck = await client.query(`
           SELECT column_name 
           FROM information_schema.columns 
           WHERE table_name = 'pkg_deployments' AND column_name = 'validation_run_id'
         `);
-        hasValidationRunIdColumn = colCheck.rows.length > 0;
+        hasValidationRunIdColumnLocal = colCheck.rows.length > 0;
       } catch (err) {
-        hasValidationRunIdColumn = false;
+        hasValidationRunIdColumnLocal = false;
       }
       
+      // CRITICAL: Never update snapshot_id - only update percent, is_active, etc.
       const updates = ['percent = $1', 'is_active = $2', 'activated_at = NOW()', 'activated_by = $3'];
       const values = [percent, effectiveIsActive, effectiveActivatedBy];
       let paramIndex = 4;
       
-      if (hasValidationRunIdColumn && validationRunId !== undefined) {
+      if (hasValidationRunIdColumnLocal && validationRunId !== undefined) {
         updates.push(`validation_run_id = $${paramIndex++}`);
         values.push(validationRunId);
       }
       
+      if (hasDeploymentKeyColumn) {
+        updates.push(`deployment_key = $${paramIndex++}`);
+        values.push(effectiveDeploymentKey);
+      }
+      
       values.push(deploymentId);
-      updates.push(`WHERE id = $${paramIndex}`);
+      const whereClause = `WHERE id = $${paramIndex}`;
       
       await client.query(`
         UPDATE pkg_deployments 
         SET ${updates.join(', ')}
+        ${whereClause}
       `, values);
     } else {
       // Create new deployment
@@ -702,7 +734,6 @@ app.post('/api/deployments', async (req, res) => {
       const insertValues = [snapshotId, target, effectiveRegion, percent, effectiveIsActive, effectiveActivatedBy];
       
       // Add optional columns if they exist
-      // (hasValidationRunIdColumn already checked before transaction)
       if (hasDeploymentKeyColumn) {
         insertColumns.push('deployment_key');
         insertValues.push(effectiveDeploymentKey);
@@ -720,6 +751,31 @@ app.post('/api/deployments', async (req, res) => {
         RETURNING id
       `, insertValues);
       deploymentId = insertResult.rows[0].id;
+    }
+    
+    // Enhancement C: When deployment reaches 100%, activate the snapshot and deactivate previous active snapshot
+    if (percent === 100 && effectiveIsActive) {
+      // Get the snapshot's environment
+      const snapshotEnvCheck = await client.query(
+        'SELECT env FROM pkg_snapshots WHERE id = $1',
+        [snapshotId]
+      );
+      
+      if (snapshotEnvCheck.rows.length > 0) {
+        const snapshotEnv = snapshotEnvCheck.rows[0].env;
+        
+        // Deactivate all other active snapshots in the same environment
+        await client.query(
+          'UPDATE pkg_snapshots SET is_active = false WHERE env = $1 AND id != $2 AND is_active = true',
+          [snapshotEnv, snapshotId]
+        );
+        
+        // Activate the current snapshot
+        await client.query(
+          'UPDATE pkg_snapshots SET is_active = true WHERE id = $1',
+          [snapshotId]
+        );
+      }
     }
     
     await client.query('COMMIT');
@@ -903,35 +959,50 @@ app.get('/api/facts', async (req, res) => {
         id::text as id,
         snapshot_id,
         namespace,
+        text,
+        tags,
+        meta_data,
         subject,
         predicate,
-        object_data as object,
+        object_data,
         valid_from,
         valid_to,
+        pkg_rule_id,
+        pkg_provenance,
+        validation_status,
         created_by,
+        created_at,
+        updated_at,
         CASE
-          WHEN valid_to IS NULL THEN 'active'
+          WHEN valid_from IS NOT NULL AND valid_from > NOW() THEN 'future'
+          WHEN valid_to IS NULL THEN 'indefinite'
           WHEN valid_to > NOW() THEN 'active'
           ELSE 'expired'
         END as status
       FROM facts
       WHERE namespace IS NOT NULL
-        AND subject IS NOT NULL
-        AND predicate IS NOT NULL
-      ORDER BY valid_from DESC
+      ORDER BY COALESCE(valid_from, created_at) DESC NULLS LAST
       LIMIT 100
     `);
     res.json(result.rows.map(row => ({
       id: row.id,
       snapshotId: row.snapshot_id || undefined,
       namespace: row.namespace,
+      text: row.text,
+      tags: row.tags || [],
+      metaData: row.meta_data || {},
       subject: row.subject,
       predicate: row.predicate,
-      object: row.object || {},
-      validFrom: row.valid_from.toISOString(),
-      validTo: row.valid_to?.toISOString(),
+      object: row.object_data || {},
+      validFrom: row.valid_from ? row.valid_from.toISOString() : undefined,
+      validTo: row.valid_to ? row.valid_to.toISOString() : undefined,
+      pkgRuleId: row.pkg_rule_id || undefined,
+      pkgProvenance: row.pkg_provenance || undefined,
+      validationStatus: row.validation_status || undefined,
       status: row.status,
       createdBy: row.created_by || undefined,
+      createdAt: row.created_at ? row.created_at.toISOString() : undefined,
+      updatedAt: row.updated_at ? row.updated_at.toISOString() : undefined,
     })));
   } catch (error) {
     console.error('Error fetching facts:', error);
@@ -1212,44 +1283,140 @@ app.post('/api/rules', async (req, res) => {
 
 // Create fact
 app.post('/api/facts', async (req, res) => {
+  const client = await pool.connect();
   try {
-    const { snapshotId, namespace, subject, predicate, object, validFrom, validTo, createdBy } = req.body;
+    await client.query('BEGIN');
     
-    // Generate text representation of the fact (required field)
-    const factText = `${subject} ${predicate} ${JSON.stringify(object || {})}`;
-    
-    const result = await pool.query(`
-      INSERT INTO facts (snapshot_id, namespace, subject, predicate, object_data, text, valid_from, valid_to, created_by)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-      RETURNING id::text as id, snapshot_id, namespace, subject, predicate, object_data as object, valid_from, valid_to, created_by
-    `, [
-      snapshotId || null,
-      namespace || 'default',
+    const {
+      text, // Required in new schema
+      namespace,
       subject,
       predicate,
-      JSON.stringify(object || {}),
-      factText,
-      validFrom ? new Date(validFrom) : new Date(),
-      validTo ? new Date(validTo) : null,
-      createdBy || 'system'
+      object_data, // New schema uses object_data
+      tags,
+      meta_data,
+      valid_from,
+      valid_to,
+      snapshot_id,
+      pkg_rule_id,
+      pkg_provenance,
+      validation_status,
+      created_by
+    } = req.body;
+    
+    // Validate required fields
+    if (!text || !text.trim()) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'text field is required' });
+    }
+    
+    if (!namespace || !namespace.trim()) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'namespace field is required' });
+    }
+    
+    // Validate structured triple: all or none
+    const hasStructured = subject || predicate || object_data !== undefined;
+    const hasAllStructured = subject && predicate && object_data !== undefined;
+    
+    if (hasStructured && !hasAllStructured) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ 
+        error: 'Structured triple requires all fields: subject, predicate, and object_data must all be provided together' 
+      });
+    }
+    
+    // Validate PKG governance: if pkg_rule_id is provided, structured triple is required
+    if (pkg_rule_id && !hasAllStructured) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ 
+        error: 'PKG governed facts (pkg_rule_id) require structured triple (subject, predicate, object_data)' 
+      });
+    }
+    
+    const result = await client.query(`
+      INSERT INTO facts (
+        text,
+        namespace,
+        tags,
+        meta_data,
+        subject,
+        predicate,
+        object_data,
+        valid_from,
+        valid_to,
+        snapshot_id,
+        pkg_rule_id,
+        pkg_provenance,
+        validation_status,
+        created_by
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+      RETURNING 
+        id::text as id,
+        snapshot_id,
+        namespace,
+        text,
+        tags,
+        meta_data,
+        subject,
+        predicate,
+        object_data,
+        valid_from,
+        valid_to,
+        pkg_rule_id,
+        pkg_provenance,
+        validation_status,
+        created_by,
+        created_at,
+        updated_at
+    `, [
+      text.trim(),
+      namespace.trim(),
+      tags || [],
+      meta_data || {},
+      subject || null,
+      predicate || null,
+      object_data !== undefined ? (typeof object_data === 'string' ? object_data : JSON.stringify(object_data)) : null,
+      valid_from ? new Date(valid_from) : null,
+      valid_to ? new Date(valid_to) : null,
+      snapshot_id || null,
+      pkg_rule_id || null,
+      pkg_provenance || null,
+      validation_status || null,
+      created_by || 'system'
     ]);
     
+    await client.query('COMMIT');
+    
     const row = result.rows[0];
+    
+    // Map snake_case to camelCase for response
     res.json({
       id: row.id,
       snapshotId: row.snapshot_id || undefined,
       namespace: row.namespace,
+      text: row.text,
+      tags: row.tags || [],
+      metaData: row.meta_data || {},
       subject: row.subject,
       predicate: row.predicate,
-      object: row.object || {},
-      validFrom: row.valid_from.toISOString(),
+      object: row.object_data || {},
+      validFrom: row.valid_from?.toISOString(),
       validTo: row.valid_to?.toISOString(),
-      status: 'active',
-      createdBy: row.created_by || undefined,
+      pkgRuleId: row.pkg_rule_id,
+      pkgProvenance: row.pkg_provenance,
+      validationStatus: row.validation_status,
+      createdBy: row.created_by,
+      createdAt: row.created_at?.toISOString(),
+      updatedAt: row.updated_at?.toISOString(),
     });
   } catch (error) {
+    await client.query('ROLLBACK');
     console.error('Error creating fact:', error);
     res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
   }
 });
 

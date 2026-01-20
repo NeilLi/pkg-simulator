@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Sparkles, Loader2, AlertTriangle } from 'lucide-react';
 import { initializeHotelScenario } from '../services/initializationService';
 import { clearCache } from '../mockData';
+import { PkgEnv } from '../types';
 
 /**
  * InitializationPage - System Bootstrap & Scenario Seeding
@@ -17,15 +18,19 @@ import { clearCache } from '../mockData';
 export const InitializationPage: React.FC = () => {
   const [initializing, setInitializing] = useState(false);
   const [initMessage, setInitMessage] = useState<string | null>(null);
+  const [selectedEnv, setSelectedEnv] = useState<PkgEnv>(PkgEnv.PROD);
 
   const handleInitialize = async () => {
     setInitializing(true);
     setInitMessage(null);
     try {
-      const result = await initializeHotelScenario();
+      // Only initialize for the selected environment (single environment support)
+      const result = await initializeHotelScenario(selectedEnv);
       if (result.success) {
+        const envLabel = selectedEnv === PkgEnv.PROD ? 'production' : 
+                        selectedEnv === PkgEnv.STAGING ? 'staging' : 'development';
         setInitMessage(
-          `✅ Initialization successful! Created: ${result.created.snapshots} snapshot(s), ` +
+          `✅ Initialization successful for ${envLabel} environment! Created: ${result.created.snapshots} snapshot(s), ` +
           `${result.created.subtaskTypes} subtask type(s), ${result.created.rules} rule(s), ` +
           `${result.created.facts} fact(s)`
         );
@@ -60,35 +65,54 @@ export const InitializationPage: React.FC = () => {
                 <div className="text-sm text-amber-800">
                   <p className="font-semibold mb-1">Warning: Bootstrap Operation</p>
                   <p className="text-xs">
-                    This operation creates baseline snapshots, rules, and facts. 
+                    This operation creates baseline snapshots, rules, and facts for a single environment (prod, staging, or dev). 
                     The initialization is idempotent - running it multiple times will not create duplicates.
+                    To initialize multiple environments, run this operation separately for each environment.
                   </p>
                 </div>
               </div>
             </div>
           </div>
           
-          <button
-            onClick={handleInitialize}
-            disabled={initializing}
-            className={`flex items-center space-x-2 px-4 py-2 rounded-lg font-medium transition-colors ${
-              initializing
-                ? 'bg-gray-400 cursor-not-allowed text-white'
-                : 'bg-indigo-600 hover:bg-indigo-700 text-white'
-            }`}
-          >
-            {initializing ? (
-              <>
-                <Loader2 className="h-5 w-5 animate-spin" />
-                <span>Initializing...</span>
-              </>
-            ) : (
-              <>
-                <Sparkles className="h-5 w-5" />
-                <span>Initialize Hotel Scenario</span>
-              </>
-            )}
-          </button>
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <label htmlFor="env-select" className="text-sm font-medium text-gray-700">
+                Environment:
+              </label>
+              <select
+                id="env-select"
+                value={selectedEnv}
+                onChange={(e) => setSelectedEnv(e.target.value as PkgEnv)}
+                disabled={initializing}
+                className="px-3 py-1.5 border border-gray-300 rounded-md text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <option value={PkgEnv.PROD}>Production</option>
+                <option value={PkgEnv.STAGING}>Staging</option>
+                <option value={PkgEnv.DEV}>Development</option>
+              </select>
+            </div>
+            <button
+              onClick={handleInitialize}
+              disabled={initializing}
+              className={`flex items-center space-x-2 px-4 py-2 rounded-lg font-medium transition-colors ${
+                initializing
+                  ? 'bg-gray-400 cursor-not-allowed text-white'
+                  : 'bg-indigo-600 hover:bg-indigo-700 text-white'
+              }`}
+            >
+              {initializing ? (
+                <>
+                  <Loader2 className="h-5 w-5 animate-spin" />
+                  <span>Initializing...</span>
+                </>
+              ) : (
+                <>
+                  <Sparkles className="h-5 w-5" />
+                  <span>Initialize Hotel Scenario</span>
+                </>
+              )}
+            </button>
+          </div>
         </div>
         
         {initMessage && (
@@ -107,7 +131,7 @@ export const InitializationPage: React.FC = () => {
         <ul className="space-y-2 text-sm text-gray-600">
           <li className="flex items-start">
             <span className="text-green-500 mr-2">✓</span>
-            <span><strong>Snapshots:</strong> Production, staging, and dev environments with baseline configuration</span>
+            <span><strong>Snapshots:</strong> Single environment snapshot (selected environment) with baseline configuration</span>
           </li>
           <li className="flex items-start">
             <span className="text-green-500 mr-2">✓</span>
@@ -120,6 +144,10 @@ export const InitializationPage: React.FC = () => {
           <li className="flex items-start">
             <span className="text-green-500 mr-2">✓</span>
             <span><strong>Temporal Facts:</strong> Plug-in unit registrations (robots, printers, IoT devices, staff, city services)</span>
+          </li>
+          <li className="flex items-start">
+            <span className="text-gray-400 mr-2">○</span>
+            <span><strong>Deployments:</strong> <em>Not created during initialization.</em> Deployments must be created through the Control Plane workflow (Promote → Validate → Deploy).</span>
           </li>
         </ul>
       </div>

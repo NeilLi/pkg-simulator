@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bot, GitMerge, ShieldAlert, Terminal,
-  ArrowRight, CheckCircle, XCircle, Loader2, Play, RotateCcw
+  ArrowRight, CheckCircle, XCircle, Loader2, Play, RotateCcw,
+  Server, Radio, Edit, Pause, Clock
 } from 'lucide-react';
 
-import { getSnapshots, getRules, getSubtaskTypes } from '../mockData';
-import { EvolutionProposal, AgentLog, Snapshot, ValidationRun, Rule, PkgEnv, SubtaskType } from '../types';
+import { getSnapshots, getRules, getSubtaskTypes, getDeployments } from '../mockData';
+import { EvolutionProposal, AgentLog, Snapshot, ValidationRun, Rule, PkgEnv, SubtaskType, Deployment, DeploymentTarget } from '../types';
 
 import {
   proposeEvolution,
@@ -14,10 +15,11 @@ import {
   calculateCanaryStep,
   promoteToWasm,
 } from '../services/agentSystem';
+import { generateEvolutionPlan } from '../services/geminiService';
 
 import { createSnapshot } from '../services/snapshotService';
 import { createRule } from '../services/ruleService';
-import { createOrUpdateDeployment } from '../services/deploymentService';
+import { createOrUpdateDeployment, rollbackDeploymentLane, getRolloutEvents } from '../services/deploymentService';
 
 // ---------- helpers ----------
 const mkId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -74,7 +76,15 @@ export const ControlPlane: React.FC = () => {
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [rules, setRules] = useState<Rule[]>([]);
   const [subtaskTypes, setSubtaskTypes] = useState<SubtaskType[]>([]);
+  const [deployments, setDeployments] = useState<Deployment[]>([]);
+  const [rolloutEvents, setRolloutEvents] = useState<any[]>([]);
   const [loadingData, setLoadingData] = useState(true);
+
+  // Deployment management state
+  const [editingDeployment, setEditingDeployment] = useState<Deployment | null>(null);
+  const [editDeploymentPercent, setEditDeploymentPercent] = useState<number>(0);
+  const [updatingDeployment, setUpdatingDeployment] = useState(false);
+  const [deploymentMessage, setDeploymentMessage] = useState<string | null>(null);
 
   // Select base snapshot explicitly (prevents "wrong base" surprises)
   const [baseSnapshotId, setBaseSnapshotId] = useState<number | null>(null);
@@ -93,6 +103,9 @@ export const ControlPlane: React.FC = () => {
 
   const baseSnapshot = useMemo(() => pickBaseSnapshot(snapshots, baseSnapshotId), [snapshots, baseSnapshotId]);
   const prodSnapshots = useMemo(() => snapshots.filter(s => s.env === PkgEnv.PROD), [snapshots]);
+  
+  // Option to deploy an existing snapshot directly (for first-time initialization)
+  const [selectedSnapshotForDeployment, setSelectedSnapshotForDeployment] = useState<number | null>(null);
 
   const addLog = (agent: AgentLog['agent'], message: string, level: AgentLog['level'] = 'INFO', pid?: string) => {
     const effectivePid = pid || pipelineIdRef.current;
@@ -123,14 +136,52 @@ export const ControlPlane: React.FC = () => {
   useEffect(() => {
     const loadData = async () => {
       try {
-        const [snaps, ruls, sts] = await Promise.all([getSnapshots(), getRules(), getSubtaskTypes()]);
+        const [snaps, ruls, sts, deps, events] = await Promise.all([
+          getSnapshots(), 
+          getRules(), 
+          getSubtaskTypes(),
+          getDeployments(false), // Get all deployments, not just active
+          getRolloutEvents({ limit: 10 }).catch(() => []), // Optional: rollout events
+        ]);
         setSnapshots(snaps);
         setRules(ruls);
         setSubtaskTypes(sts || []);
+        setDeployments(deps || []);
+        setRolloutEvents(events || []);
 
         // pick default base snapshot id (active prod preferred)
         const base = pickBaseSnapshot(snaps, null);
         setBaseSnapshotId(base?.id ?? null);
+
+        // FIRST-TIME DETECTION: If no deployments exist, automatically select the first snapshot for deployment
+        // This prevents creating a new snapshot when we should deploy the initialized one
+        if ((deps || []).length === 0 && snaps.length > 0) {
+          // Find the first snapshot (usually snapshot_id=1 from initialization)
+          const firstSnapshot = snaps
+            .filter(s => s.env === PkgEnv.PROD)
+            .sort((a, b) => (a.id || 0) - (b.id || 0))[0]; // Sort by id, get first
+          
+          if (firstSnapshot) {
+            setSelectedSnapshotForDeployment(firstSnapshot.id || null);
+            // Set as draftSnapshot so it can be deployed
+            // If snapshot is not WASM, treat it as 'native' so promotion button shows
+            setDraftSnapshot({
+              ...firstSnapshot,
+              artifactFormat: firstSnapshot.artifactFormat === 'wasm' ? 'wasm' : 'native', // Treat undefined/null as 'native' for promotion
+            });
+            setDeploymentPercent(0);
+            // Log first-time detection (addLog will be called after component mounts)
+            setTimeout(() => {
+              const runId = pipelineIdRef.current;
+              const formatStatus = firstSnapshot.artifactFormat === 'wasm' 
+                ? 'WASM format' 
+                : firstSnapshot.artifactFormat === 'native'
+                ? 'Native format (needs promotion)'
+                : 'Unknown format (may need promotion)';
+              addLog('DEPLOYMENT', `First-time detected: No deployments found. Selected snapshot ${firstSnapshot.version} (id=${firstSnapshot.id}, ${formatStatus})`, 'INFO', runId);
+            }, 100);
+          }
+        }
       } catch (error) {
         console.error('Error loading control plane data:', error);
       } finally {
@@ -139,6 +190,296 @@ export const ControlPlane: React.FC = () => {
     };
     loadData();
   }, []);
+
+  // Get active snapshot for deployment filtering
+  // Priority: 1) Active PROD snapshot from DB, 2) Selected snapshot for deployment, 3) Draft snapshot
+  const activeSnapshot = useMemo(() => {
+    const activeFromDb = snapshots.find(s => s.isActive && s.env === PkgEnv.PROD);
+    if (activeFromDb) return activeFromDb;
+    
+    if (selectedSnapshotForDeployment) {
+      const selected = snapshots.find(s => s.id === selectedSnapshotForDeployment);
+      if (selected) return selected;
+    }
+    
+    return draftSnapshot;
+  }, [snapshots, draftSnapshot, selectedSnapshotForDeployment]);
+
+  const activeSnapshotId = activeSnapshot?.id;
+
+  // Filter deployments by active snapshot
+  const snapshotDeployments = useMemo(() => {
+    if (!activeSnapshotId) return [];
+    return deployments.filter(d => d.snapshotId === activeSnapshotId);
+  }, [deployments, activeSnapshotId]);
+
+  // Deployment management functions
+  const handleEditDeployment = (deployment: Deployment) => {
+    setEditingDeployment(deployment);
+    setEditDeploymentPercent(deployment.percent);
+    setDeploymentMessage(null);
+  };
+
+  const handleCancelEdit = () => {
+    setEditingDeployment(null);
+    setEditDeploymentPercent(0);
+    setDeploymentMessage(null);
+  };
+
+  const handleUpdateDeployment = async () => {
+    if (!editingDeployment || !activeSnapshotId) return;
+
+    setUpdatingDeployment(true);
+    setDeploymentMessage(null);
+    const runId = pipelineIdRef.current;
+
+    try {
+      const result = await createOrUpdateDeployment({
+        snapshotId: activeSnapshotId,
+        target: editingDeployment.target,
+        region: editingDeployment.region,
+        percent: editDeploymentPercent,
+        isActive: editDeploymentPercent > 0,
+        activatedBy: 'control-plane',
+        deploymentKey: `control-plane-edit-${Date.now()}`,
+        isRollback: editDeploymentPercent < editingDeployment.percent,
+      });
+
+      setDeploymentMessage(
+        `✅ Deployment updated: ${editingDeployment.target} (${editingDeployment.region}) → ${editDeploymentPercent}%`
+      );
+      addLog('DEPLOYMENT', `Run ${runId}: Updated deployment ${editingDeployment.target} to ${editDeploymentPercent}%`, 'SUCCESS', runId);
+      
+      // Reload deployments
+      const [deps, events] = await Promise.all([
+        getDeployments(false),
+        getRolloutEvents({ limit: 10 }).catch(() => []),
+      ]);
+      setDeployments(deps || []);
+      setRolloutEvents(events || []);
+
+      setTimeout(() => {
+        handleCancelEdit();
+        setDeploymentMessage(null);
+      }, 2000);
+    } catch (error: any) {
+      setDeploymentMessage(`❌ Error: ${error.message || String(error)}`);
+      addLog('DEPLOYMENT', `Run ${runId}: Failed to update deployment: ${error.message}`, 'ERROR', runId);
+    } finally {
+      setUpdatingDeployment(false);
+    }
+  };
+
+  const handleRollbackDeployment = async (deployment: Deployment) => {
+    if (!activeSnapshotId) return;
+
+    setUpdatingDeployment(true);
+    setDeploymentMessage(null);
+    const runId = pipelineIdRef.current;
+
+    try {
+      await rollbackDeploymentLane({
+        snapshotId: activeSnapshotId,
+        target: deployment.target,
+        region: deployment.region,
+        activatedBy: 'control-plane',
+        deploymentKey: `control-plane-rollback-${Date.now()}`,
+      });
+
+      setDeploymentMessage(
+        `✅ Deployment rolled back: ${deployment.target} (${deployment.region})`
+      );
+      addLog('DEPLOYMENT', `Run ${runId}: Rolled back deployment ${deployment.target}`, 'WARN', runId);
+      
+      // Reload deployments
+      const [deps, events] = await Promise.all([
+        getDeployments(false),
+        getRolloutEvents({ limit: 10 }).catch(() => []),
+      ]);
+      setDeployments(deps || []);
+      setRolloutEvents(events || []);
+
+      setTimeout(() => setDeploymentMessage(null), 3000);
+    } catch (error: any) {
+      setDeploymentMessage(`❌ Rollback failed: ${error.message || String(error)}`);
+      addLog('DEPLOYMENT', `Run ${runId}: Failed to rollback deployment: ${error.message}`, 'ERROR', runId);
+    } finally {
+      setUpdatingDeployment(false);
+    }
+  };
+
+  const handleDeactivateDeployment = async (deployment: Deployment) => {
+    if (!activeSnapshotId) return;
+
+    setUpdatingDeployment(true);
+    setDeploymentMessage(null);
+    const runId = pipelineIdRef.current;
+
+    try {
+      await createOrUpdateDeployment({
+        snapshotId: activeSnapshotId,
+        target: deployment.target,
+        region: deployment.region,
+        percent: 0,
+        isActive: false,
+        activatedBy: 'control-plane',
+        deploymentKey: `control-plane-deactivate-${Date.now()}`,
+        isRollback: true,
+      });
+
+      setDeploymentMessage(
+        `✅ Deployment deactivated: ${deployment.target} (${deployment.region})`
+      );
+      addLog('DEPLOYMENT', `Run ${runId}: Deactivated deployment ${deployment.target}`, 'WARN', runId);
+      
+      // Reload deployments
+      const [deps, events] = await Promise.all([
+        getDeployments(false),
+        getRolloutEvents({ limit: 10 }).catch(() => []),
+      ]);
+      setDeployments(deps || []);
+      setRolloutEvents(events || []);
+
+      setTimeout(() => setDeploymentMessage(null), 3000);
+    } catch (error: any) {
+      setDeploymentMessage(`❌ Deactivation failed: ${error.message || String(error)}`);
+      addLog('DEPLOYMENT', `Run ${runId}: Failed to deactivate deployment: ${error.message}`, 'ERROR', runId);
+    } finally {
+      setUpdatingDeployment(false);
+    }
+  };
+
+  // -------- Step 0: Initialize First Snapshot (when no snapshots exist) --------
+  // NOTE: This should only be used when NO snapshots exist at all
+  // If snapshots exist but no deployments, use the existing snapshot instead
+  const handleInitializeFirstSnapshot = async () => {
+    if (loadingData) return;
+
+    const newRunId = mkId();
+    setPipelineId(newRunId);
+    pipelineIdRef.current = newRunId;
+
+    setProposal(null);
+    setDraftSnapshot(null);
+    setDraftRules([]);
+    setValidationResult(null);
+    setDeploymentPercent(0);
+
+    const intentForRun = intent.trim() || 'Initialize baseline policy snapshot for hotel operations';
+    setRunIntent(intentForRun);
+
+    setIsEvolving(true);
+    addLog('EVOLUTION', `Run ${newRunId}: Initializing first snapshot from scratch...`, 'INFO', newRunId);
+
+    try {
+      // Create a minimal base snapshot for initialization
+      const initialVersion = `v1.0.0-${Date.now()}`;
+      const initialSnapshot: Snapshot = {
+        id: 0, // Temporary, will be replaced when saved to DB
+        version: initialVersion,
+        env: PkgEnv.PROD,
+        stage: 'DRAFT',
+        isActive: false,
+        checksum: '0'.repeat(64),
+        sizeBytes: 0,
+        createdAt: new Date().toISOString(),
+        notes: `Initial snapshot: ${intentForRun}`,
+        artifactFormat: 'native'
+      };
+
+      // Generate evolution plan without a base (use empty version)
+      const prop = await generateEvolutionPlan(intentForRun, 'v0.0.0-initial', []);
+      
+      if (!prop) {
+        addLog('EVOLUTION', 'Failed to generate initial proposal. Check API Key.', 'ERROR', newRunId);
+        setIsEvolving(false);
+        return;
+      }
+
+      // Create proposal with initial snapshot as base
+      const proposal: EvolutionProposal = {
+        ...prop,
+        id: `prop-${Date.now()}`,
+        baseSnapshotId: 0, // No base snapshot for initialization
+        status: 'PENDING',
+        generatedAt: new Date().toISOString(),
+        newVersion: prop.newVersion || initialVersion
+      };
+
+      // Build snapshot from proposal with empty base rules (no existing rules to copy)
+      const { snapshot, newRules } = buildSnapshotFromProposal(proposal, []);
+
+      // Save snapshot to database
+      addLog('EVOLUTION', 'Saving initial snapshot to database...', 'INFO', newRunId);
+      const savedSnapshot = await createSnapshot({
+        version: snapshot.version,
+        env: snapshot.env,
+        checksum: snapshot.checksum,
+        sizeBytes: snapshot.sizeBytes,
+        notes: snapshot.notes,
+        isActive: false,
+      });
+
+      if (!savedSnapshot.id || savedSnapshot.id < 1) {
+        throw new Error('Initial snapshot created but did not receive a valid database ID');
+      }
+
+      addLog('EVOLUTION', `Initial snapshot saved (id=${savedSnapshot.id}).`, 'SUCCESS', newRunId);
+
+      const snapshotWithDbId: Snapshot = {
+        ...snapshot,
+        id: savedSnapshot.id,
+        checksum: savedSnapshot.checksum,
+        sizeBytes: savedSnapshot.sizeBytes,
+        createdAt: savedSnapshot.createdAt,
+      };
+
+      // Attach saved snapshot id to all rules
+      const rulesForDb = newRules.map(r => ({
+        ...r,
+        snapshotId: savedSnapshot.id,
+      }));
+
+      // Persist rules to database
+      if (persistRulesOnBuild && rulesForDb.length > 0) {
+        addLog('EVOLUTION', `Persisting ${rulesForDb.length} initial rule(s) into DB...`, 'INFO', newRunId);
+        
+        for (const r of rulesForDb) {
+          const ruleSource = ruleSourceFromIntentOrStructure(intentForRun, r);
+          await createRule({
+            snapshotId: savedSnapshot.id,
+            ruleName: r.ruleName,
+            priority: r.priority,
+            engine: r.engine,
+            ruleSource,
+            conditions: r.conditions || [],
+            emissions: (r.emissions || []).map(e => ({
+              subtaskTypeId: e.subtaskTypeId || '',
+              relationshipType: e.relationshipType,
+              params: e.params || {}
+            }))
+          });
+        }
+        addLog('EVOLUTION', `Persisted ${rulesForDb.length} rule(s).`, 'SUCCESS', newRunId);
+      }
+
+      setDraftSnapshot(snapshotWithDbId);
+      setDraftRules(rulesForDb);
+      setProposal(proposal);
+      
+      // Reload snapshots to include the new one
+      const updatedSnaps = await getSnapshots();
+      setSnapshots(updatedSnaps);
+      setBaseSnapshotId(savedSnapshot.id);
+
+      addLog('EVOLUTION', `Initial snapshot created: ${snapshot.version}`, 'SUCCESS', newRunId);
+    } catch (e: any) {
+      addLog('EVOLUTION', `Initialization error: ${e?.message || String(e)}`, 'ERROR', newRunId);
+      console.error('Initialization error:', e);
+    } finally {
+      if (pipelineIdRef.current === newRunId) setIsEvolving(false);
+    }
+  };
 
   // -------- Step 1: Evolution --------
   const handleEvolution = async () => {
@@ -163,7 +504,7 @@ export const ControlPlane: React.FC = () => {
 
     const base = pickBaseSnapshot(snapshots, baseSnapshotId);
     if (!base) {
-      addLog('EVOLUTION', 'No snapshots available. Load snapshots first.', 'ERROR', newRunId);
+      addLog('EVOLUTION', 'No snapshots available. Use "Initialize First Snapshot" to create one.', 'ERROR', newRunId);
       setIsEvolving(false);
       return;
     }
@@ -374,8 +715,58 @@ export const ControlPlane: React.FC = () => {
   const handleDeployStep = async () => {
     const runId = pipelineIdRef.current;
     
-    if (!draftSnapshot || !draftSnapshot.id) {
-      addLog('DEPLOYMENT', 'Cannot deploy: No snapshot available', 'ERROR', runId);
+    // Determine which snapshot to deploy: selected existing snapshot OR draft snapshot
+    const snapshotToDeploy = selectedSnapshotForDeployment 
+      ? snapshots.find(s => s.id === selectedSnapshotForDeployment)
+      : draftSnapshot;
+    
+    if (!snapshotToDeploy || !snapshotToDeploy.id) {
+      addLog('DEPLOYMENT', 'Cannot deploy: No snapshot available. Select an existing snapshot or complete Evolution → Build.', 'ERROR', runId);
+      return;
+    }
+    
+    // For existing snapshots, check if they're WASM format (required for deployment)
+    // If not WASM, automatically promote it first (for first-time deployment convenience)
+    let finalSnapshotToDeploy = snapshotToDeploy;
+    
+    if (selectedSnapshotForDeployment && snapshotToDeploy.artifactFormat !== 'wasm') {
+      // Check if this is a first-time deployment scenario (no deployments exist)
+      const isFirstTimeDeployment = deployments.length === 0;
+      
+      if (isFirstTimeDeployment && (snapshotToDeploy.artifactFormat === 'native' || !snapshotToDeploy.artifactFormat)) {
+        // Automatically promote to WASM for first-time deployment
+        addLog('DEPLOYMENT', `Promoting snapshot ${snapshotToDeploy.version} to WASM format before deployment...`, 'INFO', runId);
+        
+        try {
+          // Load rules for this snapshot
+          const snapshotRules = rules.filter(r => r.snapshotId === snapshotToDeploy.id);
+          
+          // Promote to WASM
+          const promoted = await promoteToWasm(snapshotToDeploy, snapshotRules);
+          
+          // Update the snapshot in our state
+          setSnapshots(prev => prev.map(s => s.id === snapshotToDeploy.id ? promoted : s));
+          setDraftSnapshot(promoted);
+          setSelectedSnapshotForDeployment(promoted.id);
+          
+          // Use the promoted snapshot for deployment
+          finalSnapshotToDeploy = promoted;
+          
+          addLog('DEPLOYMENT', `Successfully promoted to WASM. Proceeding with deployment...`, 'SUCCESS', runId);
+        } catch (error: any) {
+          addLog('DEPLOYMENT', `Failed to promote snapshot: ${error?.message || String(error)}. Please promote manually.`, 'ERROR', runId);
+          return;
+        }
+      } else {
+        // Not first-time or not native format - require manual promotion
+        addLog('DEPLOYMENT', `Cannot deploy: Snapshot ${snapshotToDeploy.version} must be promoted to WASM format first. Use the "Promote to WASM" button.`, 'ERROR', runId);
+        return;
+      }
+    }
+    
+    // Final check: ensure snapshot is WASM format
+    if (!finalSnapshotToDeploy || finalSnapshotToDeploy.artifactFormat !== 'wasm') {
+      addLog('DEPLOYMENT', `Cannot deploy: Snapshot must be in WASM format.`, 'ERROR', runId);
       return;
     }
     
@@ -397,7 +788,7 @@ export const ControlPlane: React.FC = () => {
     try {
       // Persist deployment to database
       const deploymentResult = await createOrUpdateDeployment({
-        snapshotId: draftSnapshot.id,
+        snapshotId: finalSnapshotToDeploy.id,
         target: 'router', // Default target, could be made configurable
         region: 'global',
         percent: nextStep,
@@ -425,7 +816,28 @@ export const ControlPlane: React.FC = () => {
       addLog('DEPLOYMENT', deploymentMsg, 'WARN', runId);
 
       if (nextStep === 100) {
-        addLog('DEPLOYMENT', `Run ${runId}: full rollout complete. Snapshot ${draftSnapshot.version} deployed to PROD.`, 'SUCCESS', runId);
+        addLog('DEPLOYMENT', `Run ${runId}: full rollout complete. Snapshot ${snapshotToDeploy.version} deployed to PROD.`, 'SUCCESS', runId);
+      }
+
+      // Reload deployments and snapshots to show the newly created deployment and updated active snapshot
+      try {
+        const [snaps, deps, events] = await Promise.all([
+          getSnapshots(), // Reload snapshots to get updated is_active status
+          getDeployments(false),
+          getRolloutEvents({ limit: 10 }).catch(() => []),
+        ]);
+        setSnapshots(snaps);
+        setDeployments(deps || []);
+        setRolloutEvents(events || []);
+        
+        // Update activeSnapshotId if the deployed snapshot became active
+        const newActiveSnapshot = snaps.find(s => s.isActive && s.env === PkgEnv.PROD);
+        if (newActiveSnapshot && newActiveSnapshot.id === snapshotToDeploy.id) {
+          // Clear selected snapshot since it's now active
+          setSelectedSnapshotForDeployment(null);
+        }
+      } catch (reloadError) {
+        console.warn('Failed to reload data after deployment:', reloadError);
       }
     } catch (error: any) {
       addLog('DEPLOYMENT', `Failed to persist deployment: ${error?.message || String(error)}`, 'ERROR', runId);
@@ -519,14 +931,39 @@ export const ControlPlane: React.FC = () => {
               </div>
             </div>
             
-            <button 
-              onClick={handleEvolution}
-              disabled={loadingData || isEvolving || !!proposal}
-              className={`w-full flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white ${isEvolving || !!proposal ? 'bg-gray-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'}`}
-            >
-              {isEvolving ? <Loader2 className="animate-spin mr-2 h-4 w-4"/> : <Bot className="mr-2 h-4 w-4"/>}
-              Analyze & Propose
-            </button>
+            {snapshots.length === 0 ? (
+              <div className="space-y-3">
+                <div className="bg-amber-50 border border-amber-200 rounded-md p-3 text-xs text-amber-800">
+                  <strong>No snapshots found.</strong> Initialize the first snapshot to get started.
+                </div>
+                <button 
+                  onClick={handleInitializeFirstSnapshot}
+                  disabled={loadingData || isEvolving}
+                  className={`w-full flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white ${isEvolving ? 'bg-gray-400 cursor-not-allowed' : 'bg-amber-600 hover:bg-amber-700'}`}
+                >
+                  {isEvolving ? <Loader2 className="animate-spin mr-2 h-4 w-4"/> : <Bot className="mr-2 h-4 w-4"/>}
+                  Initialize First Snapshot
+                </button>
+              </div>
+            ) : deployments.length === 0 ? (
+              <div className="space-y-3">
+                <div className="bg-blue-50 border border-blue-200 rounded-md p-3 text-xs text-blue-800">
+                  <strong>First-time deployment detected.</strong> Use the "Deploy Existing Snapshot" option in the Validation & Deployment column to deploy snapshot_id=1.
+                </div>
+                <div className="text-xs text-gray-500 text-center">
+                  Evolution → Build creates new snapshots. For first-time, deploy the initialized snapshot instead.
+                </div>
+              </div>
+            ) : (
+              <button 
+                onClick={handleEvolution}
+                disabled={loadingData || isEvolving || !!proposal}
+                className={`w-full flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white ${isEvolving || !!proposal ? 'bg-gray-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+              >
+                {isEvolving ? <Loader2 className="animate-spin mr-2 h-4 w-4"/> : <Bot className="mr-2 h-4 w-4"/>}
+                Analyze & Propose
+              </button>
+            )}
 
             {proposal && (
               <div className="mt-4 bg-indigo-50 border border-indigo-100 rounded-md p-4">
@@ -590,12 +1027,12 @@ export const ControlPlane: React.FC = () => {
                <div className="w-full space-y-6">
                   {/* Snapshot Info */}
                   <div className={`border p-4 rounded-lg text-center ${
-                    draftSnapshot.artifactFormat === 'native' 
+                    (draftSnapshot.artifactFormat === 'native' || !draftSnapshot.artifactFormat)
                       ? 'bg-amber-50 border-amber-200' 
                       : 'bg-purple-50 border-purple-200'
                   }`}>
                     <div className="text-xs font-bold uppercase mb-2">
-                      {draftSnapshot.artifactFormat === 'native' ? 'NATIVE SNAPSHOT' : 'WASM SNAPSHOT'}
+                      {(draftSnapshot.artifactFormat === 'native' || !draftSnapshot.artifactFormat) ? 'NATIVE SNAPSHOT' : 'WASM SNAPSHOT'}
                     </div>
                     <div className="font-mono text-lg font-bold text-gray-900">{draftSnapshot.version}</div>
                     <div className="text-xs text-gray-600 mt-2">
@@ -627,7 +1064,7 @@ export const ControlPlane: React.FC = () => {
                           <div className="text-xs text-gray-500">Draft snapshot</div>
                         </div>
                       </div>
-                      {draftSnapshot.artifactFormat === 'native' && (
+                      {(draftSnapshot.artifactFormat === 'native' || !draftSnapshot.artifactFormat) && (
                         <div className="text-xs bg-amber-200 text-amber-800 px-2 py-1 rounded">Current</div>
                       )}
                     </div>
@@ -664,8 +1101,8 @@ export const ControlPlane: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Promote Button */}
-                  {draftSnapshot.artifactFormat === 'native' && (
+                  {/* Promote Button - Show if native or undefined (needs promotion) */}
+                  {(draftSnapshot.artifactFormat === 'native' || !draftSnapshot.artifactFormat) && (
                     <button 
                       onClick={handlePromoteToWasm}
                       disabled={isPromoting}
@@ -705,6 +1142,54 @@ export const ControlPlane: React.FC = () => {
             <span className="text-xs font-mono bg-gray-200 px-2 py-1 rounded">AGENT-3</span>
           </div>
           <div className="p-4 flex-1 flex flex-col">
+             
+             {/* Option to deploy existing snapshot (for first-time initialization) */}
+             {!draftSnapshot && snapshots.length > 0 && (
+               <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                 <div className="text-xs font-semibold text-blue-800 mb-2">Deploy Existing Snapshot (Skip Evolution/Build)</div>
+                 <select
+                   value={selectedSnapshotForDeployment ?? ''}
+                   onChange={(e) => {
+                     const id = e.target.value ? Number(e.target.value) : null;
+                     setSelectedSnapshotForDeployment(id);
+                     if (id) {
+                       const snap = snapshots.find(s => s.id === id);
+                       if (snap) {
+                         // Set as draftSnapshot so it can be deployed
+                         // Treat undefined/null as 'native' so promotion button shows
+                         setDraftSnapshot({
+                           ...snap,
+                           artifactFormat: snap.artifactFormat === 'wasm' ? 'wasm' : 'native',
+                         });
+                         setValidationResult(null);
+                         setDeploymentPercent(0);
+                         const runId = pipelineIdRef.current;
+                         addLog('DEPLOYMENT', `Selected existing snapshot ${snap.version} (id=${snap.id}) for deployment`, 'INFO', runId);
+                       }
+                     } else {
+                       setDraftSnapshot(null);
+                       setSelectedSnapshotForDeployment(null);
+                     }
+                   }}
+                   className="w-full px-2 py-1.5 border border-blue-300 rounded text-sm text-gray-700 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                 >
+                   <option value="">Select snapshot to deploy...</option>
+                   {prodSnapshots
+                     .filter(s => s.artifactFormat === 'wasm' || !s.artifactFormat) // Allow WASM or undefined (from initialization)
+                     .map(s => (
+                       <option key={s.id} value={s.id}>
+                         {s.version} {s.isActive ? '★' : ''} (id={s.id})
+                       </option>
+                     ))}
+                 </select>
+                 {selectedSnapshotForDeployment && (
+                   <div className="mt-2 text-xs text-blue-700">
+                     Selected: {snapshots.find(s => s.id === selectedSnapshotForDeployment)?.version}
+                     <span className="ml-2 text-blue-600">(You can deploy without validation)</span>
+                   </div>
+                 )}
+               </div>
+             )}
              
              {!draftSnapshot || draftSnapshot.artifactFormat !== 'wasm' ? (
                <div className="flex-1 flex flex-col items-center justify-center text-gray-400">
@@ -747,45 +1232,65 @@ export const ControlPlane: React.FC = () => {
              ) : deploymentPercent === 0 ? (
                /* Validation Complete, Ready for Deployment */
                <div className="space-y-6">
-                  <div className={`border rounded-lg p-4 ${validationResult.success ? 'bg-white border-green-200' : 'bg-red-50 border-red-200'}`}>
-                     <div className="flex items-center justify-between mb-4">
-                        <span className="font-bold text-gray-700">Validation Report</span>
-                        {validationResult.success ? <CheckCircle className="text-green-500"/> : <XCircle className="text-red-500"/>}
-                     </div>
-                     <div className="grid grid-cols-2 gap-4 text-center mb-4">
-                        <div className="bg-gray-50 p-2 rounded">
-                           <div className="text-xl font-bold text-gray-800">{validationResult.report?.passed}</div>
-                           <div className="text-xs text-gray-500">Passed Checks</div>
-                        </div>
-                        <div className="bg-gray-50 p-2 rounded">
-                           <div className="text-xl font-bold text-gray-800">{validationResult.report?.failed}</div>
-                           <div className="text-xs text-gray-500">Failures</div>
-                        </div>
-                     </div>
-                     {validationResult.report?.conflicts && validationResult.report.conflicts.length > 0 && (
-                        <div className="bg-red-50 border border-red-200 rounded p-3 mb-4">
-                           <div className="text-xs font-bold text-red-800 mb-2">Conflicts:</div>
-                           <ul className="list-disc pl-5 text-xs text-red-700">
-                              {validationResult.report.conflicts.map((c, i) => (
-                                 <li key={i}>{c}</li>
-                              ))}
-                           </ul>
-                        </div>
-                     )}
-                     {validationResult.success ? (
-                        <button 
-                           onClick={() => handleDeployStep()}
-                           className="w-full bg-emerald-600 text-white py-2 rounded shadow hover:bg-emerald-700 flex justify-center items-center"
-                        >
-                           <ArrowRight className="h-4 w-4 mr-2" />
-                           Proceed to Canary Deployment
-                        </button>
-                     ) : (
-                        <div className="text-center text-red-700 text-sm font-semibold">
-                           Validation Failed - Cannot Deploy
-                        </div>
-                     )}
-                  </div>
+                  {validationResult ? (
+                    <div className={`border rounded-lg p-4 ${validationResult.success ? 'bg-white border-green-200' : 'bg-red-50 border-red-200'}`}>
+                       <div className="flex items-center justify-between mb-4">
+                          <span className="font-bold text-gray-700">Validation Report</span>
+                          {validationResult.success ? <CheckCircle className="text-green-500"/> : <XCircle className="text-red-500"/>}
+                       </div>
+                       <div className="grid grid-cols-2 gap-4 text-center mb-4">
+                          <div className="bg-gray-50 p-2 rounded">
+                             <div className="text-xl font-bold text-gray-800">{validationResult.report?.passed}</div>
+                             <div className="text-xs text-gray-500">Passed Checks</div>
+                          </div>
+                          <div className="bg-gray-50 p-2 rounded">
+                             <div className="text-xl font-bold text-gray-800">{validationResult.report?.failed}</div>
+                             <div className="text-xs text-gray-500">Failures</div>
+                          </div>
+                       </div>
+                       {validationResult.report?.conflicts && validationResult.report.conflicts.length > 0 && (
+                          <div className="bg-red-50 border border-red-200 rounded p-3 mb-4">
+                             <div className="text-xs font-bold text-red-800 mb-2">Conflicts:</div>
+                             <ul className="list-disc pl-5 text-xs text-red-700">
+                                {validationResult.report.conflicts.map((c, i) => (
+                                   <li key={i}>{c}</li>
+                                ))}
+                             </ul>
+                          </div>
+                       )}
+                       {validationResult.success ? (
+                          <button 
+                             onClick={() => handleDeployStep()}
+                             className="w-full bg-emerald-600 text-white py-2 rounded shadow hover:bg-emerald-700 flex justify-center items-center"
+                          >
+                             <ArrowRight className="h-4 w-4 mr-2" />
+                             Proceed to Canary Deployment
+                          </button>
+                       ) : (
+                          <div className="text-center text-red-700 text-sm font-semibold">
+                             Validation Failed - Cannot Deploy
+                          </div>
+                       )}
+                    </div>
+                  ) : selectedSnapshotForDeployment ? (
+                    /* Deploy existing snapshot without validation */
+                    <div className="border rounded-lg p-4 bg-blue-50 border-blue-200">
+                       <div className="flex items-center justify-between mb-4">
+                          <span className="font-bold text-gray-700">Deploy Existing Snapshot</span>
+                          <CheckCircle className="text-blue-500"/>
+                       </div>
+                       <div className="text-sm text-gray-600 mb-4">
+                          Ready to deploy: <span className="font-mono font-semibold">{draftSnapshot?.version}</span>
+                       </div>
+                       <button 
+                          onClick={() => handleDeployStep()}
+                          className="w-full bg-emerald-600 text-white py-2 rounded shadow hover:bg-emerald-700 flex justify-center items-center"
+                       >
+                          <ArrowRight className="h-4 w-4 mr-2" />
+                          Deploy Snapshot
+                       </button>
+                    </div>
+                  ) : null}
                </div>
              ) : (
                /* Active Deployment */
@@ -864,6 +1369,237 @@ export const ControlPlane: React.FC = () => {
         </div>
 
       </div>
+
+      {/* Deployment Management Section */}
+      {activeSnapshotId ? (
+        <div className="bg-white border border-gray-200 rounded-lg shadow-sm">
+          <div className="p-4 border-b border-gray-200">
+            <h3 className="font-semibold text-gray-700 flex items-center gap-2">
+              <Server className="h-5 w-5 text-indigo-600" />
+              Active Nodes & Deployments Management
+              <span className="text-xs font-normal text-gray-500">
+                ({snapshotDeployments.length} deployment{snapshotDeployments.length !== 1 ? 's' : ''})
+              </span>
+            </h3>
+            <p className="text-xs text-gray-500 mt-1">
+              Manage deployments for snapshot: <span className="font-mono">{activeSnapshot?.version}</span>
+            </p>
+          </div>
+
+          <div className="p-4">
+            {deploymentMessage && (
+              <div className={`mb-4 p-3 rounded text-sm ${
+                deploymentMessage.startsWith('✅') 
+                  ? 'bg-green-50 text-green-700 border border-green-200' 
+                  : 'bg-red-50 text-red-700 border border-red-200'
+              }`}>
+                {deploymentMessage}
+              </div>
+            )}
+
+            {snapshotDeployments.length === 0 ? (
+              <div className="text-center py-8 text-gray-400">
+                <div className="text-sm mb-2">
+                  No deployments for this snapshot. Deployments will appear here after deployment operations.
+                </div>
+                {draftSnapshot && draftSnapshot.artifactFormat === 'wasm' && !validationResult && (
+                  <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded text-xs text-amber-800">
+                    <strong>Next Step:</strong> Run Validation (click "Run Validation" button in the Validation & Deployment column)
+                  </div>
+                )}
+                {validationResult && validationResult.success && deploymentPercent === 0 && (
+                  <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded text-xs text-green-800">
+                    <strong>Ready to Deploy:</strong> Click "Proceed to Canary Deployment" button in the Validation & Deployment column to create your first deployment
+                  </div>
+                )}
+                <div className="text-xs text-gray-500 mt-3 space-y-1">
+                  <p><strong>How to initialize deployments:</strong></p>
+                  <ol className="list-decimal list-inside space-y-1 text-left max-w-md mx-auto">
+                    <li>Complete the pipeline: Evolution → Build → Promote to WASM → Validate</li>
+                    <li>After validation passes, click "Proceed to Canary Deployment"</li>
+                    <li>Deployments will be created automatically and appear here</li>
+                    <li>You can then edit, rollback, or deactivate them using the action buttons</li>
+                  </ol>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {snapshotDeployments.map(dep => {
+                  const snap = snapshots.find(s => s.id === dep.snapshotId);
+                  const isEditing = editingDeployment?.id === dep.id;
+                  
+                  return (
+                    <div key={dep.id} className={`p-4 rounded-lg border-2 ${
+                      dep.isActive 
+                        ? 'bg-green-50 border-green-200' 
+                        : 'bg-gray-50 border-gray-200'
+                    }`}>
+                      {isEditing ? (
+                        // Edit mode
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center space-x-2">
+                              <Radio className={`h-4 w-4 ${dep.isActive ? 'text-green-500' : 'text-gray-300'}`} />
+                              <span className="font-medium text-gray-700 capitalize">{dep.target}</span>
+                              <span className="text-gray-400 text-xs">({dep.region})</span>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="number"
+                              min="0"
+                              max="100"
+                              value={editDeploymentPercent}
+                              onChange={(e) => setEditDeploymentPercent(Math.max(0, Math.min(100, Number(e.target.value))))}
+                              className="flex-1 px-3 py-2 border border-gray-300 rounded text-sm"
+                              disabled={updatingDeployment}
+                            />
+                            <span className="text-sm text-gray-500">%</span>
+                          </div>
+                          <div className="flex items-center gap-2 pt-1">
+                            <button
+                              onClick={handleUpdateDeployment}
+                              disabled={updatingDeployment}
+                              className="flex-1 px-3 py-2 bg-indigo-600 text-white text-sm rounded hover:bg-indigo-700 disabled:opacity-50"
+                            >
+                              {updatingDeployment ? 'Updating...' : 'Save'}
+                            </button>
+                            <button
+                              onClick={handleCancelEdit}
+                              disabled={updatingDeployment}
+                              className="px-3 py-2 bg-gray-200 text-gray-700 text-sm rounded hover:bg-gray-300 disabled:opacity-50"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        // View mode
+                        <div>
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="flex items-center space-x-2">
+                              <Radio className={`h-4 w-4 ${dep.isActive ? 'text-green-500' : 'text-gray-300'}`} />
+                              <span className="font-medium text-gray-700 capitalize">{dep.target}</span>
+                              <span className="text-gray-400 text-xs">({dep.region})</span>
+                            </div>
+                            <div className="flex items-center space-x-2">
+                              <span className="bg-gray-100 px-2 py-0.5 rounded text-xs font-mono">{snap?.version}</span>
+                              <span className={`font-bold ${
+                                dep.percent === 100 ? 'text-green-600' :
+                                dep.percent > 0 ? 'text-blue-600' : 'text-gray-600'
+                              }`}>
+                                {dep.percent ?? 0}%
+                              </span>
+                            </div>
+                          </div>
+                          {dep.isActive && (
+                            <div className="flex items-center gap-2 mt-3">
+                              <button
+                                onClick={() => handleEditDeployment(dep)}
+                                className="flex items-center gap-1 px-2 py-1 text-blue-600 hover:bg-blue-50 rounded text-xs"
+                                title="Edit deployment"
+                              >
+                                <Edit className="h-3 w-3" />
+                                Edit
+                              </button>
+                              {dep.percent > 0 && (
+                                <button
+                                  onClick={() => handleRollbackDeployment(dep)}
+                                  className="flex items-center gap-1 px-2 py-1 text-amber-600 hover:bg-amber-50 rounded text-xs"
+                                  title="Rollback deployment"
+                                >
+                                  <RotateCcw className="h-3 w-3" />
+                                  Rollback
+                                </button>
+                              )}
+                              <button
+                                onClick={() => handleDeactivateDeployment(dep)}
+                                className="flex items-center gap-1 px-2 py-1 text-red-600 hover:bg-red-50 rounded text-xs"
+                                title="Deactivate deployment"
+                              >
+                                <Pause className="h-3 w-3" />
+                                Deactivate
+                              </button>
+                            </div>
+                          )}
+                          {dep.activatedBy && dep.activatedBy !== 'system' && (
+                            <div className="text-xs text-gray-500 mt-2 flex items-center gap-1">
+                              <Clock className="h-3 w-3" />
+                              Activated by: {dep.activatedBy} at {new Date(dep.activatedAt).toLocaleString()}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Recent Rollout Events */}
+            {rolloutEvents.length > 0 && (
+              <div className="mt-6 pt-4 border-t border-gray-200">
+                <div className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
+                  <Clock className="h-4 w-4" />
+                  Recent Rollout Events
+                </div>
+                <div className="space-y-2 max-h-48 overflow-y-auto">
+                  {rolloutEvents.slice(0, 10).map((event, idx) => (
+                    <div key={idx} className="text-xs text-gray-600 flex items-center justify-between p-2 bg-gray-50 rounded">
+                      <div className="flex items-center gap-2">
+                        <span className="capitalize font-medium">{event.target}</span>
+                        <span className="text-gray-400">({event.region})</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className={`font-semibold ${
+                          event.isRollback ? 'text-red-600' : 'text-green-600'
+                        }`}>
+                          {event.fromPercent !== null ? `${event.fromPercent}% → ` : ''}{event.toPercent}%
+                        </span>
+                        {event.isRollback && (
+                          <span className="text-xs px-1.5 py-0.5 bg-red-100 text-red-700 rounded">ROLLBACK</span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="mt-4 pt-4 border-t border-gray-200">
+              <div className="text-xs text-gray-500">
+                <strong>Note:</strong> Only one active deployment per (target, region) lane. 
+                Updating a deployment will deactivate previous active deployments for the same lane.
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="bg-white border border-gray-200 rounded-lg shadow-sm">
+          <div className="p-4 border-b border-gray-200">
+            <h3 className="font-semibold text-gray-700 flex items-center gap-2">
+              <Server className="h-5 w-5 text-indigo-600" />
+              Active Nodes & Deployments Management
+            </h3>
+          </div>
+          <div className="p-4">
+            <div className="text-center py-8 text-gray-400">
+              <div className="text-sm mb-2">
+                No active snapshot selected. Deployments will appear here after deployment operations.
+              </div>
+              <div className="text-xs text-gray-500 mt-3 space-y-1">
+                <p><strong>How to initialize deployments:</strong></p>
+                <ol className="list-decimal list-inside space-y-1 text-left max-w-md mx-auto">
+                  <li>Complete the pipeline: Evolution → Build → Promote to WASM → Validate</li>
+                  <li>After validation passes, click "Proceed to Canary Deployment"</li>
+                  <li>Deployments will be created automatically and appear here</li>
+                  <li>You can then edit, rollback, or deactivate them using the action buttons</li>
+                </ol>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Terminal Log */}
       <div className="h-48 bg-slate-900 rounded-lg shadow-inner overflow-hidden flex flex-col">

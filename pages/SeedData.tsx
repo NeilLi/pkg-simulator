@@ -14,12 +14,15 @@ import {
   Clock,
   Workflow,
   Eye,
+  Image,
+  Layers,
+  Settings,
 } from "lucide-react";
 import { seedDataService, SeedResult } from "../src/services/seedDataService";
 import { validateRulesWithDigitalTwin } from "../services/digitalTwinService";
 import { Snapshot, Rule } from "../types";
 
-const DEFAULT_DB_PROXY = "http://localhost:3001";
+const DEFAULT_DB_PROXY = "http://localhost:3011";
 
 type SeedProfile = "wearable_story" | "magic_atelier" | "journey_studio" | "mixed";
 type MemoryWriteMode = "dry_run" | "event_working" | "event_then_approve";
@@ -157,6 +160,10 @@ export const SeedDataEnhanced: React.FC = () => {
   
   // Emission Blueprint modal
   const [selectedBlueprint, setSelectedBlueprint] = useState<NormalizedSeed | null>(null);
+  
+  // Rendering pipeline support
+  const [renderingCapabilityRegistered, setRenderingCapabilityRegistered] = useState<boolean>(false);
+  const [isRegisteringRendering, setIsRegisteringRendering] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -191,11 +198,86 @@ export const SeedDataEnhanced: React.FC = () => {
             const rulesData = await rulesRes.json();
             setRules(rulesData);
           }
+          // Check if rendering capability is registered
+          checkRenderingCapability(active.id);
         }
       }
     } catch (error) {
       console.error('Error loading snapshot:', error);
     }
+  };
+  
+  // Check if generate_precision_mockups subtask type exists
+  const checkRenderingCapability = async (snapshotId: number) => {
+    try {
+      const res = await fetch(`${dbProxyUrl}/api/subtask-types`);
+      if (res.ok) {
+        const subtaskTypes = await res.json();
+        const hasRendering = subtaskTypes.some((st: any) => 
+          st.snapshotId === snapshotId && st.name === 'generate_precision_mockups'
+        );
+        setRenderingCapabilityRegistered(hasRendering);
+      }
+    } catch (error) {
+      console.error('Error checking rendering capability:', error);
+    }
+  };
+  
+  // Register rendering capability (generate_precision_mockups subtask type)
+  const registerRenderingCapability = async () => {
+    if (!snapshot) {
+      appendLog('⚠️ No active snapshot found');
+      return;
+    }
+    
+    setIsRegisteringRendering(true);
+    try {
+      const response = await fetch(`${dbProxyUrl}/api/subtask-types`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          snapshotId: snapshot.id,
+          name: 'generate_precision_mockups',
+          defaultParams: {
+            engine: 'three_js',
+            export_format: 'png',
+            dpi: 300,
+            description: 'Generate precision mockups using Three.js/Canvas rendering pipeline. PKG Evaluator acts as Director, Three.js/Canvas Engine acts as Cutter/Printer.',
+            agent_behavior: ['background_loop', 'task_filter']
+          }
+        })
+      });
+      
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || `Registration failed: ${response.statusText}`);
+      }
+      
+      const result = await response.json();
+      setRenderingCapabilityRegistered(true);
+      appendLog(`✅ Registered rendering capability: generate_precision_mockups (subtask type ID: ${result.id})`);
+    } catch (error: any) {
+      appendLog(`❌ Failed to register rendering capability: ${error?.message || String(error)}`);
+    } finally {
+      setIsRegisteringRendering(false);
+    }
+  };
+  
+  // Check if emission has rendering params
+  const hasRenderingParams = (params?: any): boolean => {
+    if (!params) return false;
+    return !!(params.artwork_uri || params.placement_anchor || params.scale !== undefined || params.warp_profile);
+  };
+  
+  // Extract rendering params from emission
+  const getRenderingParams = (params?: any) => {
+    if (!params) return null;
+    return {
+      artwork_uri: params.artwork_uri,
+      placement_anchor: params.placement_anchor,
+      scale: params.scale,
+      warp_profile: params.warp_profile,
+    };
   };
 
   const appendLog = (message: string) => {
@@ -544,12 +626,14 @@ export const SeedDataEnhanced: React.FC = () => {
       return <span className="text-xs text-gray-400">No emissions</span>;
     }
     
+    const hasRendering = emissions.some(e => hasRenderingParams(e.params) || e.subtaskName === 'generate_precision_mockups');
+    
     return (
-      <div className="flex flex-wrap gap-1">
+      <div className="flex flex-wrap gap-1 items-center">
         {emissions.map((e, i) => (
           <span
             key={i}
-            className={`px-1.5 py-0.5 rounded text-[10px] font-bold border ${
+            className={`px-1.5 py-0.5 rounded text-[10px] font-bold border flex items-center gap-1 ${
               e.relationshipType === "GATE"
                 ? "bg-red-100 border-red-200 text-red-700"
                 : e.relationshipType === "ORDERS"
@@ -559,8 +643,19 @@ export const SeedDataEnhanced: React.FC = () => {
             title={JSON.stringify(e.params || {}, null, 2)}
           >
             {e.relationshipType}
+            {(hasRenderingParams(e.params) || e.subtaskName === 'generate_precision_mockups') && (
+              <span title="Rendering pipeline emission">
+                <Image className="h-3 w-3" />
+              </span>
+            )}
           </span>
         ))}
+        {hasRendering && (
+          <span className="text-[10px] text-purple-600 font-semibold flex items-center gap-1" title="Data-Driven Rendering Pipeline">
+            <Layers className="h-3 w-3" />
+            Rendering
+          </span>
+        )}
       </div>
     );
   };
@@ -623,20 +718,71 @@ export const SeedDataEnhanced: React.FC = () => {
                     </div>
                     
                     {emission.params && Object.keys(emission.params).length > 0 && (
-                      <div className="mt-2 text-xs">
-                        <div className="font-medium text-gray-600 mb-1">Parameters:</div>
-                        <pre className="bg-white p-2 rounded border border-gray-200 overflow-x-auto">
-                          {JSON.stringify(emission.params, null, 2)}
-                        </pre>
+                      <div className="mt-2 space-y-2">
+                        {/* Rendering Pipeline Params */}
+                        {hasRenderingParams(emission.params) && (
+                          <div className="bg-purple-50 border border-purple-200 rounded p-3 mb-2">
+                            <div className="flex items-center gap-2 mb-2">
+                              <Layers className="h-4 w-4 text-purple-600" />
+                              <span className="font-semibold text-purple-900 text-xs">Data-Driven Rendering Pipeline</span>
+                            </div>
+                            <div className="grid grid-cols-2 gap-2 text-xs">
+                              {emission.params.artwork_uri && (
+                                <div>
+                                  <span className="font-medium text-purple-700">Artwork URI:</span>
+                                  <div className="text-purple-900 font-mono break-all">{emission.params.artwork_uri}</div>
+                                </div>
+                              )}
+                              {emission.params.placement_anchor && (
+                                <div>
+                                  <span className="font-medium text-purple-700">Placement:</span>
+                                  <div className="text-purple-900">{emission.params.placement_anchor}</div>
+                                </div>
+                              )}
+                              {emission.params.scale !== undefined && (
+                                <div>
+                                  <span className="font-medium text-purple-700">Scale:</span>
+                                  <div className="text-purple-900">{(emission.params.scale * 100).toFixed(0)}%</div>
+                                </div>
+                              )}
+                              {emission.params.warp_profile && (
+                                <div>
+                                  <span className="font-medium text-purple-700">Warp Profile:</span>
+                                  <div className="text-purple-900">{emission.params.warp_profile}</div>
+                                </div>
+                              )}
+                            </div>
+                            <div className="mt-2 text-[10px] text-purple-700 italic">
+                              PKG Evaluator (Director) → Three.js/Canvas Engine (Cutter/Printer)
+                            </div>
+                          </div>
+                        )}
+                        
+                        {/* All Parameters */}
+                        <div>
+                          <div className="font-medium text-gray-600 mb-1">All Parameters:</div>
+                          <pre className="bg-white p-2 rounded border border-gray-200 overflow-x-auto text-xs">
+                            {JSON.stringify(emission.params, null, 2)}
+                          </pre>
+                        </div>
                       </div>
                     )}
                   </div>
                 ))}
             </div>
             
-            <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-800">
-              <strong>Note:</strong> This blueprint shows the sequence of subtasks that would be executed if this seed is approved. 
-              GATE emissions block execution, ORDERS emissions trigger actions, and EMITS emissions send notifications.
+            <div className="mt-4 space-y-2">
+              <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-800">
+                <strong>Note:</strong> This blueprint shows the sequence of subtasks that would be executed if this seed is approved. 
+                GATE emissions block execution, ORDERS emissions trigger actions, and EMITS emissions send notifications.
+              </div>
+              
+              {seed.emissions.some(e => hasRenderingParams(e.params) || e.subtaskName === 'generate_precision_mockups') && (
+                <div className="p-3 bg-purple-50 border border-purple-200 rounded-lg text-xs text-purple-800">
+                  <strong>🎨 Rendering Pipeline:</strong> Emissions with rendering params (artwork_uri, placement_anchor, scale, warp_profile) 
+                  trigger the Data-Driven Rendering Pipeline where PKG Evaluator acts as Director and Three.js/Canvas Engine acts as Cutter/Printer.
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -787,6 +933,61 @@ export const SeedDataEnhanced: React.FC = () => {
               <Download className="h-4 w-4" />
             </button>
           </div>
+          
+          {/* Rendering Pipeline Capability */}
+          {snapshot && (
+            <div className="mt-4 p-4 bg-purple-50 border border-purple-200 rounded-lg">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Layers className="h-5 w-5 text-purple-600" />
+                  <div>
+                    <div className="text-sm font-semibold text-purple-900">Data-Driven Rendering Pipeline</div>
+                    <div className="text-xs text-purple-700">
+                      {renderingCapabilityRegistered 
+                        ? "Rendering capability registered (generate_precision_mockups)"
+                        : "Register rendering capability for active snapshot"}
+                    </div>
+                  </div>
+                </div>
+                {!renderingCapabilityRegistered && (
+                  <button
+                    onClick={registerRenderingCapability}
+                    disabled={isRegisteringRendering || !snapshot}
+                    className="inline-flex items-center gap-2 px-4 py-2 bg-purple-600 text-white text-sm font-semibold rounded-lg hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {isRegisteringRendering ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        Registering...
+                      </>
+                    ) : (
+                      <>
+                        <Settings className="h-4 w-4" />
+                        Register Capability
+                      </>
+                    )}
+                  </button>
+                )}
+                {renderingCapabilityRegistered && (
+                  <span className="inline-flex items-center gap-1 px-3 py-1 bg-green-100 text-green-700 text-xs font-semibold rounded-full">
+                    <CheckCircle2 className="h-3 w-3" />
+                    Ready
+                  </span>
+                )}
+              </div>
+              {renderingCapabilityRegistered && (
+                <div className="mt-3 text-xs text-purple-800 space-y-1">
+                  <div><strong>Subtask Type:</strong> generate_precision_mockups</div>
+                  <div><strong>Engine:</strong> three_js</div>
+                  <div><strong>Export Format:</strong> png</div>
+                  <div><strong>DPI:</strong> 300</div>
+                  <div className="mt-2 italic">
+                    PKG Evaluator (Director) → Three.js/Canvas Engine (Cutter/Printer)
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {summary && (

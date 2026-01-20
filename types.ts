@@ -92,13 +92,35 @@ export interface Fact {
   id: string;
   snapshotId?: number;
   namespace: string;
-  subject: string;
-  predicate: string;
-  object: any;
-  validFrom: string;
+  
+  // Text representation (required in new schema)
+  text: string;
+  
+  // Tags and metadata (new fields)
+  tags?: string[];
+  metaData?: any; // JSONB
+  
+  // Structured triple (optional but validated)
+  subject?: string;
+  predicate?: string;
+  object?: any; // Maps to object_data in DB
+  
+  // Temporal validity
+  validFrom?: string;
   validTo?: string;
-  status?: 'active' | 'expired' | 'future';
+  
+  // PKG governance fields (new)
+  pkgRuleId?: string;
+  pkgProvenance?: any; // JSONB
+  validationStatus?: string;
+  
+  // Audit fields
   createdBy?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  
+  // Computed status (from views, not stored)
+  status?: 'active' | 'expired' | 'future' | 'indefinite';
 }
 
 export type MemoryTier = 'event_working' | 'knowledge_base' | 'world_memory';

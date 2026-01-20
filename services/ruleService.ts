@@ -1,6 +1,6 @@
 import { Rule, PkgEngine, PkgConditionType, PkgOperator, PkgRelation } from '../types';
 
-const API_BASE_URL = import.meta.env.VITE_DB_PROXY_URL || 'http://localhost:3001';
+const API_BASE_URL = import.meta.env.VITE_DB_PROXY_URL || 'http://localhost:3011';
 
 export interface CreateRuleParams {
   snapshotId: number;

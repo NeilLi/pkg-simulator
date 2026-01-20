@@ -150,6 +150,27 @@ export const PolicyStudio: React.FC = () => {
 
   const activeSnapshotId = activeSnapshot?.id ?? null;
 
+  // Helper: Filter active facts (handles new status values) - filtered by active snapshot
+  const getActiveFacts = useMemo(() => {
+    return facts.filter(f => {
+      // Filter by active snapshot_id
+      if (activeSnapshotId && f.snapshotId !== activeSnapshotId) return false;
+      
+      // Handle new status values: 'active' | 'expired' | 'future' | 'indefinite'
+      if (f.status === 'active' || f.status === 'indefinite') return true;
+      // Also check temporal validity if status is not set
+      if (!f.status && f.validFrom && f.validTo) {
+        const now = new Date();
+        const from = new Date(f.validFrom);
+        const to = new Date(f.validTo);
+        return now >= from && now <= to;
+      }
+      // Facts without temporal constraints are considered active
+      if (!f.status && !f.validFrom && !f.validTo) return true;
+      return false;
+    });
+  }, [facts, activeSnapshotId]);
+
   // Filtered rules for list view
   const filteredRules = useMemo(() => {
     const snapshotId = selectedRuleSnapshotId ?? activeSnapshotId;
@@ -286,9 +307,21 @@ export const PolicyStudio: React.FC = () => {
       const result = await setupDesignGovernance(targetSnapshotId);
       
       if (result.success) {
-        setDesignGovMessage(`✅ ${result.message}`);
+        // Build detailed message showing idempotency results
+        const parts: string[] = [];
+        if (result.created.subtaskTypes > 0) {
+          parts.push(`${result.created.subtaskTypes} new subtask type${result.created.subtaskTypes > 1 ? 's' : ''}`);
+        }
+        if (result.created.rules > 0) {
+          parts.push(`${result.created.rules} new rule${result.created.rules > 1 ? 's' : ''}`);
+        }
+        if (parts.length === 0) {
+          setDesignGovMessage(`✅ Design governance already set up (idempotent: no changes needed)`);
+        } else {
+          setDesignGovMessage(`✅ ${result.message}`);
+        }
         await reloadData(); // Reload to show new subtask types and rules
-        setTimeout(() => setDesignGovMessage(null), 5000);
+        setTimeout(() => setDesignGovMessage(null), 7000); // Longer timeout for idempotency message
       } else {
         setDesignGovMessage(`❌ ${result.message}`);
       }
@@ -308,7 +341,7 @@ export const PolicyStudio: React.FC = () => {
     
     setNewFact({
       snapshotId: defaultSnapshotId,
-      namespace: 'hotel',
+      namespace: 'hotel', // Default namespace (will be trimmed on save)
       subject: '',
       predicate: '',
       object: '{}',
@@ -340,7 +373,11 @@ export const PolicyStudio: React.FC = () => {
         prompt: factPrompt,
         snapshotId: selectedSnapshot?.id,
         snapshot: selectedSnapshot,
-        existingFacts: facts.filter(f => f.status === 'active'),
+        existingFacts: facts.filter(f => {
+          // Filter by snapshotId and active status
+          if (selectedSnapshot?.id && f.snapshotId !== selectedSnapshot.id) return false;
+          return f.status === 'active';
+        }),
       });
 
       if (!generatedFact) {
@@ -361,7 +398,7 @@ export const PolicyStudio: React.FC = () => {
 
       setNewFact({
         snapshotId: selectedSnapshot?.id || null,
-        namespace: generatedFact.namespace,
+        namespace: (generatedFact.namespace || 'hotel').trim(), // Normalize namespace (trim spaces)
         subject: generatedFact.subject,
         predicate: generatedFact.predicate,
         object: JSON.stringify(generatedFact.object, null, 2),
@@ -380,6 +417,13 @@ export const PolicyStudio: React.FC = () => {
   };
 
   const handleCreateFact = async () => {
+    // Normalize namespace: trim and validate (prevent "ghost namespaces")
+    const normalizedNamespace = (newFact.namespace || 'hotel').trim();
+    if (!normalizedNamespace || normalizedNamespace.length === 0) {
+      setFactMessage('❌ Namespace cannot be empty');
+      return;
+    }
+
     if (!newFact.subject.trim() || !newFact.predicate.trim()) {
       setFactMessage('❌ Subject and predicate are required');
       return;
@@ -397,15 +441,38 @@ export const PolicyStudio: React.FC = () => {
     setFactMessage(null);
 
     try {
+      // Generate text representation for the fact (required in new schema)
+      const factText = `${newFact.subject} ${newFact.predicate} ${JSON.stringify(parsedObject)}`;
+
+      // Determine tags based on fact type and content
+      const tags: string[] = [];
+      if (newFact.snapshotId) tags.push('snapshot-scoped');
+      if (newFact.validFrom || newFact.validTo) tags.push('temporal');
+      if (parsedObject?.capabilities) tags.push('capabilities');
+      if (parsedObject?.type) tags.push(`type:${parsedObject.type}`);
+      tags.push('manual-entry'); // Tag all manual entries
+
+      // Build metadata with provenance
+      const metaData = {
+        source: 'PolicyStudio',
+        created_via: 'manual',
+        created_at: new Date().toISOString(),
+        has_temporal: !!(newFact.validFrom || newFact.validTo),
+        has_structured_triple: !!(newFact.subject && newFact.predicate && parsedObject),
+      };
+
       const fact = await createFact({
+        text: factText, // Required field in new schema
         snapshotId: newFact.snapshotId || undefined,
-        namespace: newFact.namespace,
-        subject: newFact.subject,
-        predicate: newFact.predicate,
+        namespace: normalizedNamespace, // Use normalized namespace (trimmed)
+        subject: newFact.subject.trim(),
+        predicate: newFact.predicate.trim(),
         object: parsedObject,
+        tags, // Include tags for faceting
+        metaData, // Include provenance metadata
         validFrom: newFact.validFrom || undefined,
         validTo: newFact.validTo || undefined,
-        createdBy: newFact.createdBy || 'user',
+        createdBy: (newFact.createdBy || 'user').trim(),
       });
 
       setFactMessage(`✅ Fact "${fact.subject} ${fact.predicate}" created successfully!`);
@@ -459,7 +526,8 @@ export const PolicyStudio: React.FC = () => {
     try {
       const selectedSnapshot = snapshots.find(s => s.id === newRule.snapshotId);
       const snapshotRules = rules.filter(r => r.snapshotId === newRule.snapshotId);
-      const snapshotFacts = facts.filter(f => f.snapshotId === newRule.snapshotId && f.status === 'active');
+      // Use active facts helper (handles new status values: active, indefinite, etc.)
+      const snapshotFacts = getActiveFacts.filter(f => f.snapshotId === newRule.snapshotId);
       const snapshotSubtaskTypes = subtaskTypes.filter(st => st.snapshotId === newRule.snapshotId);
       const generatedRule = await generateRuleFromNaturalLanguage({
         prompt: rulePrompt,
@@ -1004,10 +1072,24 @@ export const PolicyStudio: React.FC = () => {
                 <input
                   type="text"
                   value={newFact.namespace}
-                  onChange={(e) => setNewFact({ ...newFact, namespace: e.target.value })}
+                  onChange={(e) => {
+                    // Normalize namespace on input (trim leading/trailing spaces)
+                    const normalized = e.target.value.trim();
+                    setNewFact({ ...newFact, namespace: normalized || e.target.value });
+                  }}
+                  onBlur={(e) => {
+                    // Final normalization on blur (prevent "ghost namespaces")
+                    const normalized = e.target.value.trim();
+                    if (normalized !== e.target.value) {
+                      setNewFact({ ...newFact, namespace: normalized || 'hotel' });
+                    }
+                  }}
                   placeholder="e.g., hotel"
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
+                <p className="mt-1 text-xs text-gray-500">
+                  Namespace will be automatically trimmed (no leading/trailing spaces)
+                </p>
               </div>
 
               <div>
@@ -1614,8 +1696,17 @@ export const PolicyStudio: React.FC = () => {
             <div>
               <h3 className="font-semibold text-gray-900">Setup Design Governance</h3>
               <p className="text-sm text-gray-500 mt-1">
-                {settingUpDesignGov ? 'Setting up...' : 'Register subtask types & rules'}
+                {settingUpDesignGov ? 'Setting up...' : 'Register subtask types & rules (idempotent)'}
               </p>
+              {designGovMessage && (
+                <p className={`text-xs mt-1 ${
+                  designGovMessage.startsWith('✅') ? 'text-green-600' : 
+                  designGovMessage.startsWith('❌') ? 'text-red-600' : 
+                  'text-gray-600'
+                }`}>
+                  {designGovMessage}
+                </p>
+              )}
             </div>
           </div>
         </button>
@@ -1634,7 +1725,7 @@ export const PolicyStudio: React.FC = () => {
             <div className="text-sm text-gray-500">Total Rules</div>
           </div>
           <div>
-            <div className="text-2xl font-bold text-gray-900">{facts.filter(f => f.status === 'active').length}</div>
+            <div className="text-2xl font-bold text-gray-900">{getActiveFacts.length}</div>
             <div className="text-sm text-gray-500">Active Facts</div>
           </div>
         </div>

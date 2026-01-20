@@ -1,6 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
 
-const DEFAULT_DB_PROXY = "http://localhost:3001";
+const DEFAULT_DB_PROXY = "http://localhost:3011";
 
 export type SeedIntent = {
   story: string;

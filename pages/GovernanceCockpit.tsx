@@ -28,7 +28,7 @@ import { validateRulesWithDigitalTwin, runPreFlightValidation } from '../service
 import { processStreamFrame, StreamFrame, StreamGovernanceResult } from '../services/multimodalGovernanceService';
 import { DesignContext } from '../services/designGovernanceService';
 
-const API_BASE_URL = import.meta.env.VITE_DB_PROXY_URL || 'http://localhost:3001';
+const API_BASE_URL = import.meta.env.VITE_DB_PROXY_URL || 'http://localhost:3011';
 
 interface GovernanceCockpitProps {
   snapshotId?: number;

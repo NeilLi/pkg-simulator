@@ -309,17 +309,23 @@ export async function testRuleWithTemporalFixtures(
   for (const fixture of fixtures) {
     // Convert fixture facts to Fact format
     // Support namespace-aware fixtures (e.g., gym:checkout_time vs hotel:checkout_time)
-    const facts: Fact[] = fixture.facts.map((f) => ({
-      id: `fixture-${fixture.name}-${f.subject}`,
-      snapshotId: snapshot.id,
-      namespace: f.namespace || "hotel", // Use fixture namespace or default to "hotel"
-      subject: f.subject,
-      predicate: f.predicate,
-      object: f.object,
-      validFrom: f.validFrom,
-      validTo: f.validTo,
-      status: "active",
-    }));
+    const facts: Fact[] = fixture.facts.map((f) => {
+      // Generate text representation from structured triple (required in new schema)
+      const factText = `${f.subject} ${f.predicate} ${JSON.stringify(f.object || {})}`;
+      
+      return {
+        id: `fixture-${fixture.name}-${f.subject}`,
+        snapshotId: snapshot.id,
+        text: factText, // Required field in new schema
+        namespace: f.namespace || "hotel", // Use fixture namespace or default to "hotel"
+        subject: f.subject,
+        predicate: f.predicate,
+        object: f.object,
+        validFrom: f.validFrom,
+        validTo: f.validTo,
+        status: "active" as const,
+      };
+    });
 
     const context: TemporalEvaluationContext = {
       currentTime: fixture.currentTime,

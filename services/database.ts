@@ -5,7 +5,7 @@ import {
 } from '../types';
 
 // API base URL for the database proxy server
-const API_BASE_URL = import.meta.env.VITE_DB_PROXY_URL || 'http://localhost:3001';
+const API_BASE_URL = import.meta.env.VITE_DB_PROXY_URL || 'http://localhost:3011';
 
 // Helper to map database enums to TypeScript enums
 function mapEnv(env: string): PkgEnv {

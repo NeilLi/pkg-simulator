@@ -121,6 +121,14 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
       setUnifiedMemory(isMemory ? (mem as EnhancedMemoryItem[]) : []);
       setSnapshots(snaps);
 
+      // Set active snapshot to active snapshot ID (default to active snapshot instead of 'all')
+      if (snaps.length > 0) {
+        const activeSnap = snaps.find((s: Snapshot) => s.isActive);
+        if (activeSnap) {
+          setActiveSnapshot(activeSnap.id || 'all');
+        }
+      }
+
       // Reset paging when switching view / refresh
       setPage(1);
     } catch (e: any) {

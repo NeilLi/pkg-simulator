@@ -52,7 +52,7 @@ cd tools/pkg-simulator-v2.6
 npm run db-proxy
 ```
 
-The proxy server will start on `http://localhost:3001` by default.
+The proxy server will start on `http://localhost:3011` by default.
 
 ### 5. Start the Vite Dev Server
 
@@ -75,15 +75,15 @@ The frontend will start on `http://localhost:3000` and will connect to the proxy
 - `POSTGRES_DB` - Database name (default: `postgres`)
 - `POSTGRES_USER` - Database user (default: `postgres`)
 - `POSTGRES_PASSWORD` - Database password (default: `password`)
-- `DB_PROXY_PORT` - Proxy server port (default: `3001`)
+- `DB_PROXY_PORT` - Proxy server port (default: `3011`)
 
 **Frontend** (Vite):
-- `VITE_DB_PROXY_URL` - Proxy server URL (default: `http://localhost:3001`)
+- `VITE_DB_PROXY_URL` - Proxy server URL (default: `http://localhost:3011`)
 
 You can create a `.env` file in `tools/pkg-simulator-v2.6/`:
 
 ```env
-VITE_DB_PROXY_URL=http://localhost:3001
+VITE_DB_PROXY_URL=http://localhost:3011
 ```
 
 ## API Endpoints
@@ -106,7 +106,7 @@ The proxy server exposes the following endpoints:
 If you see connection errors:
 
 1. **Check port forwarding**: Make sure `./port-forward.sh` is running and PostgreSQL is accessible on `localhost:5432`
-2. **Check proxy server**: Verify the proxy server is running on port 3001
+2. **Check proxy server**: Verify the proxy server is running on port 3011
 3. **Check database credentials**: Ensure your environment variables match your PostgreSQL setup
 
 ### CORS Errors

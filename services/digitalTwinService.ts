@@ -211,7 +211,7 @@ export async function runPreFlightValidation(
   snapshotId: number,
   rules: Rule[],
   snapshot: Snapshot,
-  dbProxyUrl: string = "http://localhost:3001",
+  dbProxyUrl: string = "http://localhost:3011",
   apiKey?: string
 ): Promise<{
   validationRunId: number;

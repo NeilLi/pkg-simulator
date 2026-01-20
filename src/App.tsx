@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { seedDataService, SeedResult } from "./services/seedDataService";
 
-const DEFAULT_DB_PROXY = "http://localhost:3001";
+const DEFAULT_DB_PROXY = "http://localhost:3011";
 
 const formatSummary = (results: SeedResult[]) => {
   const allowed = results.filter((r) => r.policyDecision?.allowed).length;

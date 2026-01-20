@@ -179,7 +179,7 @@ export async function evaluateDesignPolicy(
   context: DesignContext,
   snapshot: Snapshot,
   contentAnalysis: DesignAnalysis["contentAnalysis"],
-  dbProxyUrl: string = "http://localhost:3001"
+  dbProxyUrl: string = "http://localhost:3011"
 ): Promise<DesignPolicyDecision> {
   // Build PKG context from design context + content analysis
   const pkgContext = {
@@ -401,7 +401,7 @@ export async function generateDesignEmissions(
 export async function governDesign(
   context: DesignContext,
   snapshot: Snapshot,
-  dbProxyUrl: string = "http://localhost:3001",
+  dbProxyUrl: string = "http://localhost:3011",
   apiKey?: string
 ): Promise<DesignAnalysis> {
   // Step 1: Analyze design content with Gemini

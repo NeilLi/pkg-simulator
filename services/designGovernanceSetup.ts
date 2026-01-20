@@ -10,7 +10,7 @@
  * - All data goes into the database through the API layer
  */
 
-const API_BASE_URL = import.meta.env.VITE_DB_PROXY_URL || 'http://localhost:3001';
+const API_BASE_URL = import.meta.env.VITE_DB_PROXY_URL || 'http://localhost:3011';
 
 import { PkgConditionType, PkgOperator, PkgRelation, PkgEngine } from '../types';
 
@@ -28,8 +28,14 @@ export interface DesignGovernanceSetupResult {
 /**
  * Register design-related subtask types for a snapshot
  * These are abstract-friendly: domain-specific details go in default_params JSONB
+ * 
+ * Idempotent: Safe to call multiple times. Will return existing IDs if subtask types already exist.
  */
-export async function registerDesignSubtaskTypes(snapshotId: number): Promise<Record<string, string>> {
+export async function registerDesignSubtaskTypes(snapshotId: number): Promise<{
+  subtaskTypeIds: Record<string, string>;
+  created: number;
+  existing: number;
+}> {
   const subtaskTypes = [
     {
       name: 'design_preview',
@@ -119,9 +125,33 @@ export async function registerDesignSubtaskTypes(snapshotId: number): Promise<Re
     }
   ];
 
-  const subtaskTypeIds: Record<string, string> = {};
+  // Step 1: Check existing subtask types for this snapshot (idempotency check)
+  let existingSubtaskTypes: Record<string, string> = {};
+  try {
+    const existingResponse = await fetch(`${API_BASE_URL}/api/subtask-types`);
+    if (existingResponse.ok) {
+      const allSubtaskTypes = await existingResponse.json();
+      const snapshotSubtaskTypes = allSubtaskTypes.filter((st: any) => st.snapshotId === snapshotId);
+      snapshotSubtaskTypes.forEach((st: any) => {
+        existingSubtaskTypes[st.name] = st.id;
+      });
+    }
+  } catch (error) {
+    console.warn('Error checking existing subtask types:', error);
+    // Continue anyway - will rely on ON CONFLICT in database
+  }
 
+  const subtaskTypeIds: Record<string, string> = { ...existingSubtaskTypes };
+  let createdCount = 0;
+  let existingCount = Object.keys(existingSubtaskTypes).length;
+
+  // Step 2: Register missing subtask types (idempotent via ON CONFLICT)
   for (const subtask of subtaskTypes) {
+    // Skip if already exists
+    if (subtaskTypeIds[subtask.name]) {
+      continue;
+    }
+
     try {
       const response = await fetch(`${API_BASE_URL}/api/subtask-types`, {
         method: 'POST',
@@ -136,16 +166,33 @@ export async function registerDesignSubtaskTypes(snapshotId: number): Promise<Re
       if (response.ok) {
         const result = await response.json();
         subtaskTypeIds[subtask.name] = result.id;
+        createdCount++;
       } else {
-        const error = await response.text();
-        console.warn(`Failed to create subtask type ${subtask.name}:`, error);
+        // Try to parse error - might be a conflict that was handled
+        try {
+          const errorData = await response.json();
+          // If the API returns an ID in error response (shouldn't happen, but handle gracefully)
+          if (errorData.id) {
+            subtaskTypeIds[subtask.name] = errorData.id;
+            existingCount++;
+          } else {
+            console.warn(`Failed to create subtask type ${subtask.name}:`, errorData.error || errorData);
+          }
+        } catch {
+          const errorText = await response.text();
+          console.warn(`Failed to create subtask type ${subtask.name}:`, errorText);
+        }
       }
     } catch (error) {
       console.error(`Error creating subtask type ${subtask.name}:`, error);
     }
   }
 
-  return subtaskTypeIds;
+  return {
+    subtaskTypeIds,
+    created: createdCount,
+    existing: existingCount,
+  };
 }
 
 /**
@@ -203,9 +250,35 @@ export async function createDesignGovernanceRules(
     { prompt: printFlowRulePrompt, priority: 100, name: 'approved_design_print_flow' },
   ];
 
+  // Step 1: Check for existing rules (idempotency check)
+  let existingRules: Set<string> = new Set();
+  try {
+    const existingResponse = await fetch(`${API_BASE_URL}/api/rules?snapshotId=${snapshotId}`);
+    if (existingResponse.ok) {
+      const allRules = await existingResponse.json();
+      allRules.forEach((rule: any) => {
+        existingRules.add(rule.ruleName.toLowerCase());
+      });
+    }
+  } catch (error) {
+    console.warn('Error checking existing rules:', error);
+    // Continue anyway - will attempt to create rules
+  }
+
   let createdCount = 0;
+  let skippedCount = 0;
 
   for (const ruleDef of rulePrompts) {
+    const ruleName = ruleDef.name;
+    const ruleNameLower = ruleName.toLowerCase();
+
+    // Skip if rule already exists (idempotency)
+    if (existingRules.has(ruleNameLower)) {
+      console.log(`Rule "${ruleName}" already exists, skipping...`);
+      skippedCount++;
+      continue;
+    }
+
     try {
       // Generate rule using Gemini
       const generatedRule = await generateRuleFromNaturalLanguage({
@@ -220,6 +293,16 @@ export async function createDesignGovernanceRules(
 
       if (!generatedRule) {
         console.warn(`Failed to generate rule: ${ruleDef.name}`);
+        continue;
+      }
+
+      // Use the generated rule name or fallback to ruleDef.name
+      const finalRuleName = generatedRule.ruleName || ruleDef.name;
+      
+      // Double-check if rule was created between check and creation (race condition protection)
+      if (existingRules.has(finalRuleName.toLowerCase())) {
+        console.log(`Rule "${finalRuleName}" was created by another process, skipping...`);
+        skippedCount++;
         continue;
       }
 
@@ -243,7 +326,7 @@ export async function createDesignGovernanceRules(
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           snapshotId,
-          ruleName: generatedRule.ruleName || ruleDef.name,
+          ruleName: finalRuleName,
           priority: ruleDef.priority,
           engine: generatedRule.engine || PkgEngine.WASM,
           ruleSource: generatedRule.ruleSource || `Design Governance: ${ruleDef.name}`,
@@ -259,13 +342,32 @@ export async function createDesignGovernanceRules(
 
       if (response.ok) {
         createdCount++;
+        // Add to existing set to prevent duplicates in same batch
+        existingRules.add(finalRuleName.toLowerCase());
       } else {
-        const error = await response.text();
-        console.warn(`Failed to create rule ${ruleDef.name}:`, error);
+        // Check if error is due to duplicate (shouldn't happen with our check, but handle gracefully)
+        try {
+          const errorData = await response.json();
+          if (errorData.error && errorData.error.toLowerCase().includes('duplicate') || 
+              errorData.error && errorData.error.toLowerCase().includes('unique')) {
+            console.log(`Rule "${finalRuleName}" already exists (detected via error), skipping...`);
+            skippedCount++;
+            existingRules.add(finalRuleName.toLowerCase());
+          } else {
+            console.warn(`Failed to create rule ${ruleDef.name}:`, errorData.error || errorData);
+          }
+        } catch {
+          const errorText = await response.text();
+          console.warn(`Failed to create rule ${ruleDef.name}:`, errorText);
+        }
       }
     } catch (error) {
       console.error(`Error creating rule ${ruleDef.name}:`, error);
     }
+  }
+
+  if (skippedCount > 0) {
+    console.log(`Skipped ${skippedCount} existing rule(s) (idempotency)`);
   }
 
   return createdCount;
@@ -273,28 +375,40 @@ export async function createDesignGovernanceRules(
 
 /**
  * Complete setup: Register subtask types and create policy rules
+ * Idempotent: Safe to call multiple times. Will skip existing subtask types and rules.
  */
 export async function setupDesignGovernance(
   snapshotId: number,
   apiKey?: string
 ): Promise<DesignGovernanceSetupResult> {
   try {
-    // Step 1: Register subtask types
-    const subtaskTypeIds = await registerDesignSubtaskTypes(snapshotId);
-    const subtaskTypesCount = Object.keys(subtaskTypeIds).length;
+    // Step 1: Register subtask types (idempotent)
+    const subtaskResult = await registerDesignSubtaskTypes(snapshotId);
+    const subtaskTypesCount = Object.keys(subtaskResult.subtaskTypeIds).length;
 
-    // Step 2: Create policy rules
-    const rulesCount = await createDesignGovernanceRules(snapshotId, subtaskTypeIds, apiKey);
+    // Step 2: Create policy rules (idempotent - checks for existing rules by name)
+    const rulesCount = await createDesignGovernanceRules(snapshotId, subtaskResult.subtaskTypeIds, apiKey);
+
+    // Build informative message
+    const parts: string[] = [];
+    if (subtaskResult.created > 0) {
+      parts.push(`${subtaskResult.created} new subtask type${subtaskResult.created > 1 ? 's' : ''}`);
+    }
+    if (subtaskResult.existing > 0) {
+      parts.push(`${subtaskResult.existing} existing subtask type${subtaskResult.existing > 1 ? 's' : ''}`);
+    }
+    const subtaskMessage = parts.length > 0 ? parts.join(', ') : `${subtaskTypesCount} subtask types`;
+    const message = `Design governance setup complete: ${subtaskMessage}, ${rulesCount} rules`;
 
     return {
       success: true,
-      message: `Design governance setup complete: ${subtaskTypesCount} subtask types, ${rulesCount} rules`,
+      message,
       snapshotId,
       created: {
-        subtaskTypes: subtaskTypesCount,
+        subtaskTypes: subtaskResult.created,
         rules: rulesCount,
       },
-      subtaskTypeIds,
+      subtaskTypeIds: subtaskResult.subtaskTypeIds,
     };
   } catch (error) {
     return {

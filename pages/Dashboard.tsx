@@ -1,33 +1,27 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, PieChart, Pie, Cell, Legend } from 'recharts';
-import {
-  getRules,
-  getFacts,
-  getDeployments,
-  getValidationRuns,
-  getSubtaskTypes,
-} from '../mockData';
 import { 
-  ShieldCheck, Activity, Database, Server, Radio, CheckCircle2, AlertTriangle, RefreshCw,
-  Workflow, Layers, TrendingUp, FileText, Clock
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, 
+  CartesianGrid, PieChart, Pie, Cell, LineChart, Line 
+} from 'recharts';
+import { 
+  ShieldCheck, Activity, Database, Server, Radio, CheckCircle2, 
+  AlertTriangle, RefreshCw, Workflow, Layers, TrendingUp, 
+  FileText, Clock, Compass, Box, Shirt, Sparkles, Wind, DoorOpen, ArrowUpDown, Image
 } from 'lucide-react';
-import { Snapshot, Rule, Fact, Deployment, ValidationRun, PkgEnv, SubtaskType, PkgRelation } from '../types';
+import { 
+  Snapshot, Rule, Fact, Deployment, ValidationRun, 
+  PkgEnv, SubtaskType, PkgRelation 
+} from '../types';
 import { listSnapshots } from '../services/snapshotService';
+import { getRules, getFacts, getDeployments, getValidationRuns, getSubtaskTypes } from '../mockData';
 
-/**
- * Dashboard - Pure Read-Only System Observation
- * 
- * Purpose: Observe system behavior, verify health, see what's live
- * 
- * Characteristics:
- * - Read-only or near read-only
- * - Aggregates already-existing state
- * - Displays metrics, health, status, trends
- * - Does NOT mutate system topology
- * - Does NOT create or destroy core entities
- * 
- * Dashboard observes the system, it does not construct the system.
- */
+const ZONE_THEMES = {
+  JOURNEY: { name: "Journey Studio", icon: Compass, color: "#8b5cf6", bg: "bg-purple-50" }, // Royal
+  GIFT: { name: "Gift Forge", icon: Box, color: "#f59e0b", bg: "bg-amber-50" }, // Gold
+  WEAR: { name: "Fashion Lab", icon: Shirt, color: "#3b82f6", bg: "bg-blue-50" }, // Blue
+  KIDS: { name: "Magic Atelier", icon: Sparkles, color: "#f43f5e", bg: "bg-rose-50" }, // Rose
+};
+
 export const Dashboard: React.FC = () => {
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [rules, setRules] = useState<Rule[]>([]);
@@ -37,640 +31,241 @@ export const Dashboard: React.FC = () => {
   const [subtaskTypes, setSubtaskTypes] = useState<SubtaskType[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-
-  // User-selected environment (read-only context)
   const [selectedEnv, setSelectedEnv] = useState<PkgEnv>(PkgEnv.PROD);
 
-  /** -----------------------------
-   * Data loading (read-only)
-   * ------------------------------*/
-
   const loadData = async (env: PkgEnv) => {
+    setRefreshing(true);
     try {
-      const snaps = await listSnapshots({ env, includeInactive: true, limit: 200 });
-      
-      // Guard against null/undefined responses
-      if (!snaps || !Array.isArray(snaps)) {
-        console.warn('listSnapshots returned invalid data:', snaps);
-        setSnapshots([]);
-      } else {
-        setSnapshots(snaps);
-      }
-
+      const snaps = await listSnapshots({ env, includeInactive: true, limit: 100 });
       const [ruls, fcts, deps, vals, sts] = await Promise.all([
-        getRules(),
-        getFacts(),
-        getDeployments(),
-        getValidationRuns(),
-        getSubtaskTypes(),
+        getRules(), getFacts(), getDeployments(), getValidationRuns(), getSubtaskTypes(),
       ]);
-
+      setSnapshots(snaps || []);
       setRules(ruls || []);
       setFacts(fcts || []);
       setDeployments(deps || []);
       setValidations(vals || []);
       setSubtaskTypes(sts || []);
     } catch (error) {
-      console.error('Error loading dashboard data:', error);
-      // Set empty arrays on error to prevent null access
-      setSnapshots([]);
-      setRules([]);
-      setFacts([]);
-      setDeployments([]);
-      setValidations([]);
-      setSubtaskTypes([]);
+      console.error('Dashboard load failed:', error);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
   };
 
-  useEffect(() => {
-    setLoading(true);
-    loadData(selectedEnv);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedEnv]);
+  useEffect(() => { loadData(selectedEnv); }, [selectedEnv]);
 
-  const handleRefresh = async () => {
-    setRefreshing(true);
-    await loadData(selectedEnv);
-  };
-
-  /** -----------------------------
-   * Computed values (read-only)
-   * ------------------------------*/
-
-  const activeSnapshot = useMemo(
-    () => snapshots.find(s => s.isActive && s.env === selectedEnv),
-    [snapshots, selectedEnv],
-  );
-
+  const activeSnapshot = useMemo(() => snapshots.find(s => s.isActive && s.env === selectedEnv), [snapshots, selectedEnv]);
   const activeSnapshotId = activeSnapshot?.id;
 
-  // Filter all data by active snapshot_id
-  const snapshotRules = useMemo(() => {
-    if (!activeSnapshotId) return [];
-    return rules.filter(r => r.snapshotId === activeSnapshotId);
-  }, [rules, activeSnapshotId]);
+  // Filter Data by Active Snapshot
+  const snapshotData = useMemo(() => {
+    if (!activeSnapshotId) return { rules: [], facts: [], subtasks: [] };
+    return {
+      rules: rules.filter(r => r.snapshotId === activeSnapshotId),
+      facts: facts.filter(f => f.snapshotId === activeSnapshotId),
+      subtasks: subtaskTypes.filter(st => st.snapshotId === activeSnapshotId),
+    };
+  }, [rules, facts, subtaskTypes, activeSnapshotId]);
 
-  const snapshotFacts = useMemo(() => {
-    if (!activeSnapshotId) return [];
-    return facts.filter(f => f.snapshotId === activeSnapshotId);
-  }, [facts, activeSnapshotId]);
-
-  const snapshotDeployments = useMemo(() => {
-    if (!activeSnapshotId) return [];
-    return deployments.filter(d => d.snapshotId === activeSnapshotId);
-  }, [deployments, activeSnapshotId]);
-
-  const snapshotValidations = useMemo(() => {
-    if (!activeSnapshotId) return [];
-    return validations.filter(v => v.snapshotId === activeSnapshotId);
-  }, [validations, activeSnapshotId]);
-
-  const snapshotSubtaskTypes = useMemo(() => {
-    if (!activeSnapshotId) return [];
-    return subtaskTypes.filter(st => st.snapshotId === activeSnapshotId);
-  }, [subtaskTypes, activeSnapshotId]);
-
-  // Enhanced stats with new fact schema support (filtered by snapshot)
-  const activeFacts = useMemo(() => {
-    return snapshotFacts.filter(f => {
-      // Handle new status values: 'active' | 'expired' | 'future' | 'indefinite'
-      if (f.status === 'active' || f.status === 'indefinite') return true;
-      // Also check temporal validity if status is not set
-      if (!f.status && f.validFrom && f.validTo) {
-        const now = new Date();
-        const from = new Date(f.validFrom);
-        const to = new Date(f.validTo);
-        return now >= from && now <= to;
-      }
-      // Facts without temporal constraints are considered active
-      if (!f.status && !f.validFrom && !f.validTo) return true;
-      return false;
+  // Zone Health Calculation
+  const zoneStats = useMemo(() => {
+    return Object.keys(ZONE_THEMES).map(zoneId => {
+      const zoneRules = snapshotData.rules.filter(r => r.ruleSource?.includes(zoneId));
+      const hasEmergency = snapshotData.facts.some(f => f.subject === `zone:${zoneId}` && f.tags?.includes('emergency'));
+      return { id: zoneId, ruleCount: zoneRules.length, status: hasEmergency ? 'ALERT' : 'STABLE' };
     });
-  }, [snapshotFacts]);
+  }, [snapshotData]);
 
-  const structuredFacts = useMemo(() => {
-    return snapshotFacts.filter(f => f.subject && f.predicate && f.object);
-  }, [snapshotFacts]);
-
-  const pkgGovernedFacts = useMemo(() => {
-    return snapshotFacts.filter(f => f.pkgRuleId);
-  }, [snapshotFacts]);
-
-  // Rules statistics (filtered by snapshot)
-  const rulesByEngine = useMemo(() => {
-    const wasm = snapshotRules.filter(r => r.engine === 'wasm').length;
-    const native = snapshotRules.filter(r => r.engine === 'native').length;
-    return { wasm, native };
-  }, [snapshotRules]);
-
-  const rulesByStatus = useMemo(() => {
-    const enabled = snapshotRules.filter(r => !r.disabled).length;
-    const disabled = snapshotRules.filter(r => r.disabled).length;
-    return { enabled, disabled };
-  }, [snapshotRules]);
-
-  // Emissions statistics (filtered by snapshot)
-  const emissionsStats = useMemo(() => {
-    const emits = snapshotRules.reduce((acc, r) => acc + (r.emissions?.filter(e => e.relationshipType === 'EMITS').length || 0), 0);
-    const orders = snapshotRules.reduce((acc, r) => acc + (r.emissions?.filter(e => e.relationshipType === 'ORDERS').length || 0), 0);
-    const gates = snapshotRules.reduce((acc, r) => acc + (r.emissions?.filter(e => e.relationshipType === 'GATE').length || 0), 0);
-    return { emits, orders, gates, total: emits + orders + gates };
-  }, [snapshotRules]);
-
-  // Recent validations (last 5, filtered by snapshot)
-  const recentValidations = useMemo(() => {
-    return [...snapshotValidations]
-      .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
-      .slice(0, 5);
-  }, [snapshotValidations]);
-
-  // Rules with emissions count (filtered by snapshot)
-  const rulesWithEmissions = useMemo(() => {
-    return snapshotRules.filter(r => r.emissions && r.emissions.length > 0).length;
-  }, [snapshotRules]);
-
-  const stats = [
-    { title: 'Active Policy', value: activeSnapshot?.version || 'N/A', icon: ShieldCheck, color: 'bg-indigo-500' },
-    { title: 'Total Rules', value: snapshotRules.length, icon: Activity, color: 'bg-emerald-500' },
-    { title: 'Active Facts', value: activeFacts.length, icon: Database, color: 'bg-blue-500' },
-    { title: 'Active Nodes', value: snapshotDeployments.filter(d => d.isActive).length, icon: Server, color: 'bg-amber-500' },
-    { title: 'Subtask Types', value: snapshotSubtaskTypes.length, icon: Layers, color: 'bg-purple-500' },
-    { title: 'Total Emissions', value: emissionsStats.total, icon: Workflow, color: 'bg-pink-500' },
-  ];
-
-  const chartData = [
-    { name: '00:00', evals: 400 },
-    { name: '04:00', evals: 300 },
-    { name: '08:00', evals: 2400 },
-    { name: '12:00', evals: 3200 },
-    { name: '16:00', evals: 2800 },
-    { name: '20:00', evals: 1800 },
-  ];
-
-  if (loading) {
-    return (
-      <div className="space-y-6">
-        <div className="text-center py-12">
-          <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
-          <p className="mt-4 text-gray-500">Loading dashboard data...</p>
-        </div>
-      </div>
-    );
-  }
+  if (loading) return <div className="p-10 text-center animate-pulse text-gray-400">Synchronizing with Cortex...</div>;
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="bg-white shadow rounded-lg p-4 border border-gray-100">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h2 className="text-lg font-semibold text-gray-900">System Dashboard</h2>
-            <p className="text-sm text-gray-500 mt-1">
-              Real-time view of system health, deployments, and policy evaluations
-            </p>
-
-            <div className="mt-3 flex flex-wrap items-center gap-3">
-              <div className="text-xs text-gray-500">Environment</div>
-              <select
-                value={selectedEnv}
-                onChange={(e) => setSelectedEnv(e.target.value as PkgEnv)}
-                className="px-3 py-1.5 border border-gray-300 rounded-md text-sm"
-              >
-                <option value={PkgEnv.PROD}>prod</option>
-                <option value={PkgEnv.STAGING}>staging</option>
-                <option value={PkgEnv.DEV}>dev</option>
-              </select>
-
-              <div className="text-xs text-gray-500">Active Policy</div>
-              <span className="text-xs font-mono bg-gray-100 px-2 py-1 rounded">
-                {activeSnapshot?.version || 'N/A'}
-              </span>
-            </div>
+    <div className="space-y-6 bg-gray-50 min-h-screen p-6">
+      {/* 1. System Header & Env Selector */}
+      <div className="bg-white shadow-sm rounded-2xl p-6 border border-gray-200 flex flex-wrap justify-between items-center gap-4">
+        <div className="flex items-center gap-4">
+          <div className="bg-slate-900 p-3 rounded-xl text-white">
+            <Activity className="h-6 w-6" />
           </div>
-          <button
-            onClick={handleRefresh}
-            disabled={refreshing}
-            className="flex items-center space-x-2 px-4 py-2 rounded-lg font-medium transition-colors bg-gray-100 hover:bg-gray-200 text-gray-700 disabled:opacity-50"
+          <div>
+            <h2 className="text-xl font-bold text-slate-900">Hotel 2030+ Observer</h2>
+            <p className="text-sm text-slate-500 font-mono">Snapshot: {activeSnapshot?.version || 'N/A'}</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <select 
+            value={selectedEnv} 
+            onChange={(e) => setSelectedEnv(e.target.value as PkgEnv)}
+            className="bg-gray-100 border-none rounded-lg px-4 py-2 text-sm font-bold text-slate-700"
           >
+            {Object.values(PkgEnv).map(e => <option key={e} value={e}>{e.toUpperCase()}</option>)}
+          </select>
+          <button onClick={() => loadData(selectedEnv)} className="p-2 hover:bg-gray-100 rounded-lg text-slate-400 transition-all">
             <RefreshCw className={`h-5 w-5 ${refreshing ? 'animate-spin' : ''}`} />
-            <span>Refresh</span>
           </button>
         </div>
       </div>
 
-      {/* Stats Grid */}
-      <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
-        {stats.map((stat) => {
-           const Icon = stat.icon;
-           return (
-            <div key={stat.title} className="bg-white overflow-hidden shadow rounded-lg border border-gray-100">
-              <div className="p-5">
-                <div className="flex items-center">
-                  <div className={`flex-shrink-0 rounded-md p-3 ${stat.color}`}>
-                    <Icon className="h-6 w-6 text-white" />
-                  </div>
-                  <div className="ml-5 w-0 flex-1">
-                    <dl>
-                      <dt className="text-sm font-medium text-gray-500 truncate">{stat.title}</dt>
-                      <dd className="text-lg font-bold text-gray-900">{stat.value}</dd>
-                    </dl>
-                  </div>
+      {/* 2. Zone Health Matrix */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        {zoneStats.map(zone => {
+          const theme = ZONE_THEMES[zone.id as keyof typeof ZONE_THEMES];
+          const Icon = theme.icon;
+          return (
+            <div key={zone.id} className={`${theme.bg} border border-white p-5 rounded-2xl shadow-sm relative overflow-hidden`}>
+              <div className="flex justify-between items-start relative z-10">
+                <div className={`p-2 rounded-lg bg-white shadow-sm ${theme.color}`}>
+                  <Icon className="h-5 w-5" />
                 </div>
+                <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${zone.status === 'STABLE' ? 'bg-green-100 text-green-700' : 'bg-rose-100 text-rose-700'}`}>
+                  {zone.status}
+                </span>
+              </div>
+              <div className="mt-4 relative z-10">
+                <h3 className="font-bold text-slate-800 text-sm">{theme.name}</h3>
+                <p className="text-[10px] text-slate-500 uppercase tracking-tighter mt-1">{zone.ruleCount} Active Rules</p>
+              </div>
+              <div className="absolute -right-4 -bottom-4 opacity-5">
+                <Icon className="h-24 w-24" />
               </div>
             </div>
-           );
+          );
         })}
       </div>
 
-      {/* Facts Overview (New Schema) - Filtered by Snapshot */}
-      <div className="bg-white shadow rounded-lg p-6 border border-gray-100">
-        <h3 className="text-md font-semibold text-gray-900 mb-4">
-          Facts Overview
-          {activeSnapshotId && (
-            <span className="text-xs font-normal text-gray-500 ml-2">
-              (Snapshot: {activeSnapshot?.version})
-            </span>
-          )}
-        </h3>
-        {activeSnapshotId ? (
-          <>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              <div className="text-center">
-                <div className="text-2xl font-bold text-gray-900">{snapshotFacts.length}</div>
-                <div className="text-sm text-gray-500">Total Facts</div>
-              </div>
-              <div className="text-center">
-                <div className="text-2xl font-bold text-blue-600">{activeFacts.length}</div>
-                <div className="text-sm text-gray-500">Active Facts</div>
-              </div>
-              <div className="text-center">
-                <div className="text-2xl font-bold text-emerald-600">{structuredFacts.length}</div>
-                <div className="text-sm text-gray-500">Structured Triples</div>
-              </div>
-              <div className="text-center">
-                <div className="text-2xl font-bold text-purple-600">{pkgGovernedFacts.length}</div>
-                <div className="text-sm text-gray-500">PKG Governed</div>
-              </div>
-            </div>
-            <div className="mt-4 pt-4 border-t border-gray-200">
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
-                <div>
-                  <span className="text-gray-500">Expired:</span>
-                  <span className="ml-2 font-semibold text-red-600">
-                    {snapshotFacts.filter(f => f.status === 'expired').length}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-gray-500">Future:</span>
-                  <span className="ml-2 font-semibold text-blue-600">
-                    {snapshotFacts.filter(f => f.status === 'future').length}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-gray-500">Indefinite:</span>
-                  <span className="ml-2 font-semibold text-green-600">
-                    {snapshotFacts.filter(f => f.status === 'indefinite').length}
-                  </span>
-                </div>
-                <div>
-                  <span className="text-gray-500">Text-Only:</span>
-                  <span className="ml-2 font-semibold text-gray-600">
-                    {snapshotFacts.filter(f => !f.subject || !f.predicate).length}
-                  </span>
-                </div>
-              </div>
-            </div>
-          </>
-        ) : (
-          <div className="text-center py-8 text-gray-400 text-sm">
-            No active snapshot selected. Please activate a snapshot in Policy Studio.
-          </div>
-        )}
-      </div>
-
-      {/* Rules & Emissions Statistics */}
+      {/* 3. Infrastructure & Fact Cortex */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Rules Breakdown */}
-        <div className="bg-white shadow rounded-lg p-6 border border-gray-100">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-            <Activity className="h-5 w-5" />
-            Rules Statistics
+        {/* Fact Triple Distribution */}
+        <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200 lg:col-span-2">
+          <h3 className="text-sm font-bold text-slate-500 uppercase mb-6 flex items-center gap-2">
+            <Database className="h-4 w-4" /> Knowledge Base Triples (Triples/Subject)
           </h3>
-          <div className="space-y-4">
-            <div>
-              <div className="text-sm text-gray-500 mb-2">By Engine</div>
-              <div className="grid grid-cols-2 gap-2">
-                <div className="p-3 bg-blue-50 rounded-lg">
-                  <div className="text-2xl font-bold text-blue-600">{rulesByEngine.wasm}</div>
-                  <div className="text-xs text-gray-600">WASM</div>
-                </div>
-                <div className="p-3 bg-green-50 rounded-lg">
-                  <div className="text-2xl font-bold text-green-600">{rulesByEngine.native}</div>
-                  <div className="text-xs text-gray-600">Native</div>
-                </div>
-              </div>
-            </div>
-            <div>
-              <div className="text-sm text-gray-500 mb-2">By Status</div>
-              <div className="grid grid-cols-2 gap-2">
-                <div className="p-3 bg-emerald-50 rounded-lg">
-                  <div className="text-2xl font-bold text-emerald-600">{rulesByStatus.enabled}</div>
-                  <div className="text-xs text-gray-600">Enabled</div>
-                </div>
-                <div className="p-3 bg-gray-50 rounded-lg">
-                  <div className="text-2xl font-bold text-gray-600">{rulesByStatus.disabled}</div>
-                  <div className="text-xs text-gray-600">Disabled</div>
-                </div>
-              </div>
-            </div>
-            <div className="pt-2 border-t border-gray-200">
-              <div className="text-sm text-gray-500">Rules with Emissions</div>
-              <div className="text-xl font-bold text-gray-900 mt-1">{rulesWithEmissions}</div>
-            </div>
+          <div className="h-64">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={[
+                { 
+                  subject: 'HVAC', 
+                  count: snapshotData.facts.filter(f => 
+                    f.subject && f.predicate && f.object !== undefined && 
+                    f.subject.toLowerCase().includes('hvac')
+                  ).length 
+                },
+                { 
+                  subject: 'ELEVATORS', 
+                  count: snapshotData.facts.filter(f => 
+                    f.subject && f.predicate && f.object !== undefined && 
+                    f.subject.toLowerCase().includes('elevator')
+                  ).length 
+                },
+                { 
+                  subject: 'ACCESS', 
+                  count: snapshotData.facts.filter(f => 
+                    f.subject && f.predicate && f.object !== undefined && 
+                    (f.subject.toLowerCase().includes('door') || f.subject.toLowerCase().includes('access'))
+                  ).length 
+                },
+                { 
+                  subject: 'ZONES', 
+                  count: snapshotData.facts.filter(f => 
+                    f.subject && f.predicate && f.object !== undefined && 
+                    f.subject.toLowerCase().includes('zone')
+                  ).length 
+                },
+              ]}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                <XAxis dataKey="subject" axisLine={false} tickLine={false} tick={{ fontSize: 10, fontWeight: 'bold' }} />
+                <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10 }} />
+                <Tooltip cursor={{ fill: '#f8fafc' }} contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)' }} />
+                <Bar dataKey="count" fill="#6366f1" radius={[6, 6, 0, 0]} barSize={40} />
+              </BarChart>
+            </ResponsiveContainer>
           </div>
         </div>
 
-        {/* Emissions Breakdown */}
-        <div className="bg-white shadow rounded-lg p-6 border border-gray-100">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-            <Workflow className="h-5 w-5" />
-            Emissions Statistics
+        {/* Subtask Type Capability Registry */}
+        <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
+          <h3 className="text-sm font-bold text-slate-500 uppercase mb-4 flex items-center gap-2">
+            <Layers className="h-4 w-4" /> Capabilities
           </h3>
-          {emissionsStats.total > 0 ? (
-            <div className="space-y-4">
-              <div className="h-48">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie
-                      data={[
-                        { name: 'EMITS', value: emissionsStats.emits, color: '#8b5cf6' },
-                        { name: 'ORDERS', value: emissionsStats.orders, color: '#3b82f6' },
-                        { name: 'GATE', value: emissionsStats.gates, color: '#ef4444' },
-                      ]}
-                      cx="50%"
-                      cy="50%"
-                      labelLine={false}
-                      label={(props: any) => {
-                        const percent = props.percent || 0;
-                        const name = props.name || '';
-                        return `${name}: ${(percent * 100).toFixed(0)}%`;
-                      }}
-                      outerRadius={60}
-                      fill="#8884d8"
-                      dataKey="value"
-                    >
-                      {[
-                        { name: 'EMITS', value: emissionsStats.emits, color: '#8b5cf6' },
-                        { name: 'ORDERS', value: emissionsStats.orders, color: '#3b82f6' },
-                        { name: 'GATE', value: emissionsStats.gates, color: '#ef4444' },
-                      ].map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={entry.color} />
-                      ))}
-                    </Pie>
-                    <Tooltip />
-                  </PieChart>
-                </ResponsiveContainer>
-              </div>
-              <div className="grid grid-cols-3 gap-2 text-xs">
-                <div className="text-center">
-                  <div className="font-bold text-purple-600">{emissionsStats.emits}</div>
-                  <div className="text-gray-500">EMITS</div>
-                </div>
-                <div className="text-center">
-                  <div className="font-bold text-blue-600">{emissionsStats.orders}</div>
-                  <div className="text-gray-500">ORDERS</div>
-                </div>
-                <div className="text-center">
-                  <div className="font-bold text-red-600">{emissionsStats.gates}</div>
-                  <div className="text-gray-500">GATE</div>
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="h-48 flex items-center justify-center text-gray-400 text-sm">
-              No emissions found
-            </div>
-          )}
-        </div>
-
-        {/* Subtask Types */}
-        <div className="bg-white shadow rounded-lg p-6 border border-gray-100">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-            <Layers className="h-5 w-5" />
-            Subtask Types
-            {activeSnapshotId && (
-              <span className="text-xs font-normal text-gray-500">
-                ({snapshotSubtaskTypes.length})
-              </span>
-            )}
-          </h3>
-          {activeSnapshotId ? (
-            snapshotSubtaskTypes.length > 0 ? (
-              <div className="space-y-2 max-h-64 overflow-y-auto">
-                {snapshotSubtaskTypes.map((st) => (
-                  <div key={st.id} className="p-2 bg-gray-50 rounded border border-gray-200">
-                    <div className="font-medium text-sm text-gray-900">{st.name}</div>
-                    {st.defaultParams && Object.keys(st.defaultParams).length > 0 && (
-                      <div className="text-xs text-gray-500 mt-1">
-                        {Object.keys(st.defaultParams).slice(0, 2).join(', ')}
-                        {Object.keys(st.defaultParams).length > 2 && '...'}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
+          <div className="space-y-3">
+            {snapshotData.subtasks.length === 0 ? (
+              <div className="text-xs text-slate-400 text-center py-4">No capabilities registered</div>
             ) : (
-              <div className="text-center py-8 text-gray-400 text-sm">
-                No subtask types registered for this snapshot
-                <div className="mt-2 text-xs">
-                  <a href="#/policy-studio" className="text-indigo-600 hover:underline">
-                    Register in Policy Studio
-                  </a>
+              snapshotData.subtasks.map(st => (
+                <div key={st.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-100">
+                  <div>
+                    <div className="text-xs font-bold text-slate-800">{st.name}</div>
+                    <div className="text-[10px] text-slate-400 mt-0.5">Executor: {st.defaultParams?.engine || 'native'}</div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {st.name === 'generate_precision_mockups' && <Image className="h-4 w-4 text-indigo-500" />}
+                    {st.name.includes('hvac') && <Wind className="h-4 w-4 text-sky-500" />}
+                  </div>
                 </div>
-              </div>
-            )
-          ) : (
-            <div className="text-center py-8 text-gray-400 text-sm">
-              No active snapshot selected
-            </div>
-          )}
+              ))
+            )}
+          </div>
         </div>
       </div>
 
+      {/* 4. Deployment & Safety Log */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        
-        {/* Main Chart */}
-        <div className="lg:col-span-2 bg-white shadow rounded-lg p-6 border border-gray-100">
-          <h3 className="text-lg leading-6 font-medium text-gray-900 mb-4 flex items-center gap-2">
-            <TrendingUp className="h-5 w-5" />
-            Policy Evaluations (24h)
+        {/* Live Deployments (Canary Status) */}
+        <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200 lg:col-span-1">
+          <h3 className="text-sm font-bold text-slate-500 uppercase mb-4 flex items-center gap-2">
+            <Server className="h-4 w-4" /> Traffic Allocation
           </h3>
-          {chartData && chartData.length > 0 ? (
-            <div className="h-72 min-h-[288px] w-full">
-              <ResponsiveContainer width="100%" height={288}>
-                <BarChart data={chartData}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} />
-                  <YAxis axisLine={false} tickLine={false} />
-                  <Tooltip 
-                    contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }}
-                    cursor={{ fill: '#f3f4f6' }}
-                  />
-                  <Bar dataKey="evals" fill="#6366f1" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          ) : (
-            <div className="h-72 min-h-[288px] flex items-center justify-center text-gray-500">
-              No chart data available
-            </div>
-          )}
+          <ul className="space-y-4">
+            {deployments.filter(d => d.snapshotId === activeSnapshotId && d.isActive).length === 0 ? (
+              <li className="text-xs text-slate-400 text-center py-4">No active deployments</li>
+            ) : (
+              deployments.filter(d => d.snapshotId === activeSnapshotId && d.isActive).map(dep => (
+                <li key={dep.id} className="space-y-2">
+                  <div className="flex justify-between text-xs">
+                    <span className="font-bold text-slate-700 uppercase">{dep.target} ({dep.region})</span>
+                    <span className="text-indigo-600 font-mono">{dep.percent}%</span>
+                  </div>
+                  <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                    <div className="bg-indigo-500 h-full transition-all duration-1000" style={{ width: `${dep.percent}%` }} />
+                  </div>
+                </li>
+              ))
+            )}
+          </ul>
         </div>
 
-        {/* Deployments & Validations */}
-        <div className="lg:col-span-1 space-y-6">
-            
-            {/* Deployments - Read Only */}
-            <div className="bg-white shadow rounded-lg p-6 border border-gray-100">
-              <div className="flex items-center justify-between mb-4">
-                 <h3 className="text-lg font-medium text-gray-900 flex items-center gap-2">
-                   <Server className="h-5 w-5" />
-                   Active Nodes & Deployments
-                   {activeSnapshotId && (
-                     <span className="text-xs font-normal text-gray-500">
-                       ({snapshotDeployments.length})
-                     </span>
-                   )}
-                 </h3>
-                 <span className="text-xs text-gray-400">pkg_deployments</span>
-              </div>
-
-              <ul className="space-y-3">
-                {!activeSnapshotId ? (
-                  <li className="text-sm text-gray-500 text-center py-4">No active snapshot selected</li>
-                ) : snapshotDeployments.length === 0 ? (
-                  <li className="text-sm text-gray-500 text-center py-4">No deployments for this snapshot</li>
-                ) : (
-                  snapshotDeployments.map(dep => {
-                    const snap = snapshots.find(s => s.id === dep.snapshotId);
-                    return (
-                      <li key={dep.id} className={`p-3 rounded-lg border-2 ${
-                        dep.isActive 
-                          ? 'bg-green-50 border-green-200' 
-                          : 'bg-gray-50 border-gray-200'
-                      }`}>
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center space-x-2">
-                            <Radio className={`h-4 w-4 ${dep.isActive ? 'text-green-500' : 'text-gray-300'}`} />
-                            <span className="font-medium text-gray-700 capitalize">{dep.target}</span>
-                            <span className="text-gray-400 text-xs">({dep.region})</span>
-                          </div>
-                          <div className="flex items-center space-x-2">
-                            <span className="bg-gray-100 px-2 py-0.5 rounded text-xs font-mono">{snap?.version}</span>
-                            <span className={`font-bold ${
-                              dep.percent === 100 ? 'text-green-600' :
-                              dep.percent > 0 ? 'text-blue-600' : 'text-gray-600'
-                            }`}>
-                              {dep.percent ?? 0}%
-                            </span>
-                          </div>
-                        </div>
-                        {dep.activatedBy && dep.activatedBy !== 'system' && (
-                          <div className="text-xs text-gray-500 mt-2 flex items-center gap-1">
-                            <Clock className="h-3 w-3" />
-                            Activated by: {dep.activatedBy} at {new Date(dep.activatedAt).toLocaleString()}
-                          </div>
-                        )}
-                      </li>
-                    );
-                  })
-                )}
-              </ul>
-
-              {activeSnapshotId && snapshotDeployments.length > 0 && (
-                <div className="mt-4 pt-4 border-t border-gray-200">
-                  <div className="text-xs text-gray-500">
-                    <strong>Note:</strong> View-only. Manage deployments in Control Plane.
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Validation Runs */}
-            <div className="bg-white shadow rounded-lg p-6 border border-gray-100">
-              <div className="flex items-center justify-between mb-4">
-                 <h3 className="text-lg font-medium text-gray-900 flex items-center gap-2">
-                   <FileText className="h-5 w-5" />
-                   Recent Validations
-                   {activeSnapshotId && (
-                     <span className="text-xs font-normal text-gray-500">
-                       ({snapshotValidations.length})
-                     </span>
-                   )}
-                 </h3>
-                 <span className="text-xs text-gray-400">pkg_validation_runs</span>
-              </div>
-              <ul className="space-y-3">
-                {!activeSnapshotId ? (
-                  <li className="text-sm text-gray-500 text-center py-4">No active snapshot selected</li>
-                ) : recentValidations.length === 0 ? (
-                  <li className="text-sm text-gray-500 text-center py-4">No validation runs for this snapshot</li>
-                ) : (
-                  recentValidations.map(run => {
-                    const snap = snapshots.find(s => s.id === run.snapshotId);
-                    const report = run.report;
-                    return (
-                      <li key={run.id} className="flex items-start justify-between text-sm p-3 bg-gray-50 rounded-lg border border-gray-200 hover:bg-gray-100 transition-colors">
-                        <div className="flex-1">
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className="font-medium text-indigo-600">{snap?.version || `Snapshot ${run.snapshotId}`}</span>
-                            {report?.type && (
-                              <span className="text-xs px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded">
-                                {report.type}
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-xs text-gray-500 flex items-center gap-2">
-                            <Clock className="h-3 w-3" />
-                            {new Date(run.startedAt).toLocaleString()}
-                          </div>
-                          {report && (
-                            <div className="mt-2 text-xs text-gray-600 space-y-1">
-                              {report.rulesEvaluated !== undefined && (
-                                <div>Rules: {report.rulesEvaluated} evaluated, {report.rulesTriggered || 0} triggered</div>
-                              )}
-                              {report.passed !== undefined && report.failed !== undefined && (
-                                <div className="flex gap-2">
-                                  <span className="text-green-600">✓ {report.passed}</span>
-                                  <span className="text-red-600">✗ {report.failed}</span>
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                        <div className="flex items-center ml-3">
-                          {run.success ? (
-                            <span className="flex items-center text-green-600 text-xs font-bold">
-                              <CheckCircle2 className="h-4 w-4 mr-1" /> PASS
-                            </span>
-                          ) : run.success === false ? (
-                            <span className="flex items-center text-red-600 text-xs font-bold">
-                              <AlertTriangle className="h-4 w-4 mr-1" /> FAIL
-                            </span>
-                          ) : (
-                            <span className="text-amber-500 text-xs font-bold animate-pulse">RUNNING...</span>
-                          )}
-                        </div>
-                      </li>
-                    );
-                  })
-                )}
-              </ul>
-            </div>
-
+        {/* Validation & Safety Events */}
+        <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200 lg:col-span-2">
+          <h3 className="text-sm font-bold text-slate-500 uppercase mb-4 flex items-center gap-2">
+            <ShieldCheck className="h-4 w-4" /> Safety & Validation Audit
+          </h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead>
+                <tr className="text-slate-400 border-b border-slate-100">
+                  <th className="pb-3">Timestamp</th>
+                  <th className="pb-3">Event</th>
+                  <th className="pb-3">Status</th>
+                  <th className="pb-3">Score</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-50">
+                {validations.filter(v => v.snapshotId === activeSnapshotId).slice(0, 5).map(run => (
+                  <tr key={run.id} className="hover:bg-slate-50 transition-colors">
+                    <td className="py-3 font-mono text-slate-400">{new Date(run.startedAt).toLocaleTimeString()}</td>
+                    <td className="py-3 font-bold text-slate-700">{run.report?.type || 'Simulation'}</td>
+                    <td className="py-3">
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${run.success ? 'bg-green-100 text-green-700' : 'bg-rose-100 text-rose-700'}`}>
+                        {run.success ? 'PASSED' : 'FAILED'}
+                      </span>
+                    </td>
+                    <td className="py-3 font-mono text-slate-500">{run.report?.simulationScore || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>

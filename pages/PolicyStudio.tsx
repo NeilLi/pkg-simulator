@@ -65,6 +65,7 @@ export const PolicyStudio: React.FC = () => {
     validFrom: '',
     validTo: '',
     createdBy: 'user',
+    pkgRuleId: null as string | null, // Link fact to a rule for governance
   });
   const [creatingFact, setCreatingFact] = useState(false);
   const [factMessage, setFactMessage] = useState<string | null>(null);
@@ -348,6 +349,7 @@ export const PolicyStudio: React.FC = () => {
       validFrom: '',
       validTo: '',
       createdBy: 'user',
+      pkgRuleId: null, // Link fact to a rule for governance
     });
     setFactPrompt('');
     setFactModalStep('prompt');
@@ -405,6 +407,7 @@ export const PolicyStudio: React.FC = () => {
         validFrom,
         validTo,
         createdBy: generatedFact.createdBy || 'user',
+        pkgRuleId: null, // Rule linking must be done manually in the form
       });
 
       setFactMessage('✅ Fact generated! Review and edit if needed.');
@@ -451,6 +454,7 @@ export const PolicyStudio: React.FC = () => {
       if (parsedObject?.capabilities) tags.push('capabilities');
       if (parsedObject?.type) tags.push(`type:${parsedObject.type}`);
       tags.push('manual-entry'); // Tag all manual entries
+      if (newFact.pkgRuleId) tags.push('pkg', 'governed'); // Tag governed facts
 
       // Build metadata with provenance
       const metaData = {
@@ -459,7 +463,29 @@ export const PolicyStudio: React.FC = () => {
         created_at: new Date().toISOString(),
         has_temporal: !!(newFact.validFrom || newFact.validTo),
         has_structured_triple: !!(newFact.subject && newFact.predicate && parsedObject),
+        is_governed: !!newFact.pkgRuleId,
       };
+
+      // For governed facts, ensure valid_from is set (defaults to now if not provided)
+      // This ensures governed facts are active immediately, consistent with InitializationPage
+      const now = new Date().toISOString();
+      const validFrom = newFact.validFrom || (newFact.pkgRuleId ? now : undefined);
+      const validTo = newFact.validTo || undefined;
+
+      // Build PKG provenance if rule is linked
+      let pkgProvenance: any = undefined;
+      let validationStatus: string | undefined = undefined;
+      
+      if (newFact.pkgRuleId) {
+        const linkedRule = rules.find(r => String(r.id) === newFact.pkgRuleId);
+        pkgProvenance = {
+          rule: linkedRule?.ruleName || 'unknown',
+          engine: linkedRule?.engine || 'wasm',
+          source: 'PolicyStudio',
+          note: 'created via manual editor',
+        };
+        validationStatus = 'trusted'; // Trust manual entries from PolicyStudio
+      }
 
       const fact = await createFact({
         text: factText, // Required field in new schema
@@ -470,8 +496,11 @@ export const PolicyStudio: React.FC = () => {
         object: parsedObject,
         tags, // Include tags for faceting
         metaData, // Include provenance metadata
-        validFrom: newFact.validFrom || undefined,
-        validTo: newFact.validTo || undefined,
+        validFrom, // Set to now() for governed facts if not provided
+        validTo,
+        pkgRuleId: newFact.pkgRuleId || undefined, // Link to rule for governance
+        pkgProvenance, // PKG provenance metadata
+        validationStatus, // Validation status for governed facts
         createdBy: (newFact.createdBy || 'user').trim(),
       });
 
@@ -1176,6 +1205,43 @@ export const PolicyStudio: React.FC = () => {
                   placeholder="e.g., user, admin, system"
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
+              </div>
+
+              {/* PKG Governance Section */}
+              <div className="border-t border-gray-200 pt-4 mt-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <Shield className="h-4 w-4 text-indigo-600" />
+                  <h4 className="text-sm font-semibold text-gray-900">PKG Governance (Optional)</h4>
+                </div>
+                <p className="text-xs text-gray-500 mb-3">
+                  Link this fact to a policy rule to make it a "governed fact". Governed facts are automatically 
+                  validated and tracked by the PKG engine. If linked, valid_from will default to now() if not specified.
+                </p>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Link to Rule (optional)
+                  </label>
+                  <select
+                    value={newFact.pkgRuleId || ''}
+                    onChange={(e) => setNewFact({ ...newFact, pkgRuleId: e.target.value || null })}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  >
+                    <option value="">None (ungoverned fact)</option>
+                    {rules
+                      .filter(r => !r.snapshotId || r.snapshotId === newFact.snapshotId || !newFact.snapshotId)
+                      .map(r => (
+                        <option key={r.id} value={String(r.id)}>
+                          {r.ruleName} (priority: {r.priority}, engine: {String(r.engine)})
+                        </option>
+                      ))}
+                  </select>
+                  <p className="mt-1 text-xs text-gray-500">
+                    {newFact.pkgRuleId 
+                      ? '✅ This fact will be linked to the selected rule and governed by PKG engine'
+                      : 'Leave empty to create an ungoverned fact (not linked to any rule)'}
+                  </p>
+                </div>
               </div>
 
               {factMessage && (

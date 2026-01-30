@@ -1,1167 +1,225 @@
-import React, { useMemo, useRef, useState, useEffect } from "react";
+import React, { useState } from "react";
 import {
-  Download,
-  XCircle,
-  CheckCircle2,
-  Loader2,
-  Play,
-  Shield,
-  Database,
-  Brain,
-  Zap,
-  Search,
-  AlertTriangle,
-  Clock,
-  Workflow,
-  Eye,
-  Image,
-  Layers,
-  Settings,
+  CheckCircle2, Loader2, Play, Shield, Database,
+  Layers, Compass, Box, Shirt, Sparkles, Wind, ArrowUpDown
 } from "lucide-react";
-import { seedDataService, SeedResult } from "../src/services/seedDataService";
-import { validateRulesWithDigitalTwin } from "../services/digitalTwinService";
-import { Snapshot, Rule } from "../types";
+import { seedDataService, SeedResult } from "../services/seedDataService";
 
 const DEFAULT_DB_PROXY = "http://localhost:3011";
 
-type SeedProfile = "wearable_story" | "magic_atelier" | "journey_studio" | "mixed";
+// Support for all 2030+ Hotel Scenes
+type SeedProfile = "JOURNEY" | "GIFT" | "WEAR" | "KIDS" | "INFRASTRUCTURE" | "MIXED";
 type MemoryWriteMode = "dry_run" | "event_working" | "event_then_approve";
 
-type NormalizedSeed = SeedResult & {
-  // normalized fields for UI
-  id?: string;
-  title?: string;
-  seedHash?: string;
-  allowed?: boolean;
-  reason?: string;
-  memoryTierIntended?: "event_working" | "knowledge_base";
-  written?: boolean;
-  // Step 5: Digital Twin Critic
-  criticReport?: {
-    passed: boolean;
-    issues: Array<{
-      severity: "critical" | "warning" | "info";
-      issue: string;
-      recommendation?: string;
-    }>;
-    validationScore: number;
-  };
-  // Step 6: Temporal Awareness
-  validity?: {
-    from: string; // ISO timestamp
-    to?: string; // ISO timestamp (null = indefinite)
-  };
-  // Emission Blueprinting
-  emissions?: Array<{
-    subtaskName: string;
-    relationshipType: "EMITS" | "ORDERS" | "GATE";
-    params?: any;
-    position?: number;
-  }>;
-};
+const ZONES = [
+  { id: "JOURNEY", name: "Journey Studio", icon: Compass, color: "text-purple-600", bg: "bg-purple-50" },
+  { id: "GIFT", name: "Gift Forge", icon: Box, color: "text-amber-600", bg: "bg-amber-50" },
+  { id: "WEAR", name: "Fashion Lab", icon: Shirt, color: "text-blue-600", bg: "bg-blue-50" },
+  { id: "KIDS", name: "Magic Atelier", icon: Sparkles, color: "text-rose-600", bg: "bg-rose-50" },
+  { id: "INFRASTRUCTURE", name: "Building Systems", icon: Wind, color: "text-slate-600", bg: "bg-slate-50" }
+];
 
-function clamp(n: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, n));
-}
-
-async function sha256Hex(input: string): Promise<string> {
-  const enc = new TextEncoder().encode(input);
-  const digest = await crypto.subtle.digest("SHA-256", enc);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-function safeJsonStringify(v: any) {
-  try {
-    return JSON.stringify(v, Object.keys(v).sort(), 2);
-  } catch {
-    return JSON.stringify(v);
-  }
-}
-
-function formatSummary(items: NormalizedSeed[]) {
-  const allowed = items.filter((r) => r.allowed).length;
-  const blocked = items.length - allowed;
-  const written = items.filter((r) => r.written).length;
-  return `Generated ${items.length} seeds. Allowed: ${allowed}. Blocked: ${blocked}. Written: ${written}.`;
-}
-
-function normalizeSeed(r: SeedResult): NormalizedSeed {
-  const allowed = Boolean(r.policyDecision?.allowed);
-  const reason =
-    (r as any)?.policyDecision?.reason ||
-    (r as any)?.policyDecision?.message ||
-    (allowed ? "Allowed by policy" : "Blocked by policy");
-  const title = (r as any)?.ticket?.title || (r as any)?.title || (r as any)?.name;
-  const id = String((r as any)?.id || (r as any)?.ticketId || (r as any)?.taskId || "");
-
-  // Step 6: Capture temporal validity from Migration 016 integration
-  const temporalContext = (r as any)?.temporalContext;
-  const validity = temporalContext ? {
-    from: temporalContext.from || new Date().toISOString(),
-    to: temporalContext.to || undefined,
-  } : {
-    from: new Date().toISOString(),
-    to: undefined,
-  };
-  
-  // Capture subtask emissions from policy decision (Migration 013)
-  const emissions = (r as any)?.policyDecision?.matchedRules?.[0]?.emissions || 
-                    (r as any)?.policyDecision?.emissions || 
-                    [];
-
-  // Step 5: Critic report (will be populated after Digital Twin validation)
-  const criticReport = (r as any)?.criticReport;
-
-  return {
-    ...r,
-    id: id || undefined,
-    title: title || undefined,
-    allowed,
-    reason,
-    validity, // For Step 6: Temporal Awareness
-    emissions, // For Emission Blueprinting
-    criticReport, // For Step 5: Digital Twin Critic
-    written: Boolean((r as any)?.written || (r as any)?.appended || (r as any)?.stored),
-  };
-}
-
-/**
- * SeedDataEnhanced
- *
- * Purpose:
- * - Generate wearable seeds (structured tickets)
- * - Evaluate with PKG policy
- * - Optionally write to Unified Memory's *underlying* sources:
- *   - event_working => tasks + task_multimodal_embeddings (Tier A)
- *   - approve flow => later promotion to graph_embeddings_1024 (Tier B/C)
- */
-export const SeedDataEnhanced: React.FC = () => {
-  const [count, setCount] = useState(8);
-  const [dbProxyUrl, setDbProxyUrl] = useState(DEFAULT_DB_PROXY);
-
-  const [profile, setProfile] = useState<SeedProfile>("wearable_story");
-  const [includeKnowledge, setIncludeKnowledge] = useState(true);
-
+export const SeedData: React.FC = () => {
+  const [count, setCount] = useState(10);
+  const [profile, setProfile] = useState<SeedProfile>("MIXED");
   const [writeMode, setWriteMode] = useState<MemoryWriteMode>("event_working");
   const [isRunning, setIsRunning] = useState(false);
-  const [progress, setProgress] = useState({ done: 0, total: 0 });
-
+  const [results, setResults] = useState<SeedResult[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
-  const [results, setResults] = useState<NormalizedSeed[]>([]);
 
-  const [query, setQuery] = useState("");
-  const [showOnlyAllowed, setShowOnlyAllowed] = useState(false);
-
-  // Step 5 & 6: Snapshot and rules for Digital Twin & Temporal evaluation
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
-  const [rules, setRules] = useState<Rule[]>([]);
-  
-  // Emission Blueprint modal
-  const [selectedBlueprint, setSelectedBlueprint] = useState<NormalizedSeed | null>(null);
-  
-  // Rendering pipeline support
-  const [renderingCapabilityRegistered, setRenderingCapabilityRegistered] = useState<boolean>(false);
-  const [isRegisteringRendering, setIsRegisteringRendering] = useState(false);
-
-  const abortRef = useRef<AbortController | null>(null);
-
-  const summary = useMemo(() => (results.length ? formatSummary(results) : ""), [results]);
-
-  const filtered = useMemo(() => {
-    let out = [...results];
-    if (showOnlyAllowed) out = out.filter((x) => x.allowed);
-    if (query.trim()) {
-      const q = query.toLowerCase();
-      out = out.filter((x) => safeJsonStringify(x).toLowerCase().includes(q));
-    }
-    return out;
-  }, [results, showOnlyAllowed, query]);
-
-  // Load active snapshot and rules on mount
-  useEffect(() => {
-    loadActiveSnapshot();
-  }, [dbProxyUrl]);
-  
-  const loadActiveSnapshot = async () => {
-    try {
-      const res = await fetch(`${dbProxyUrl}/api/snapshots`);
-      if (res.ok) {
-        const snapshots = await res.json();
-        const active = snapshots.find((s: Snapshot) => s.isActive) || snapshots[0];
-        if (active) {
-          setSnapshot(active);
-          // Load rules for this snapshot
-          const rulesRes = await fetch(`${dbProxyUrl}/api/rules?snapshotId=${active.id}`);
-          if (rulesRes.ok) {
-            const rulesData = await rulesRes.json();
-            setRules(rulesData);
-          }
-          // Check if rendering capability is registered
-          checkRenderingCapability(active.id);
-        }
-      }
-    } catch (error) {
-      console.error('Error loading snapshot:', error);
-    }
-  };
-  
-  // Check if generate_precision_mockups subtask type exists
-  const checkRenderingCapability = async (snapshotId: number) => {
-    try {
-      const res = await fetch(`${dbProxyUrl}/api/subtask-types`);
-      if (res.ok) {
-        const subtaskTypes = await res.json();
-        const hasRendering = subtaskTypes.some((st: any) => 
-          st.snapshotId === snapshotId && st.name === 'generate_precision_mockups'
-        );
-        setRenderingCapabilityRegistered(hasRendering);
-      }
-    } catch (error) {
-      console.error('Error checking rendering capability:', error);
-    }
-  };
-  
-  // Register rendering capability (generate_precision_mockups subtask type)
-  const registerRenderingCapability = async () => {
-    if (!snapshot) {
-      appendLog('⚠️ No active snapshot found');
-      return;
-    }
-    
-    setIsRegisteringRendering(true);
-    try {
-      const response = await fetch(`${dbProxyUrl}/api/subtask-types`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          snapshotId: snapshot.id,
-          name: 'generate_precision_mockups',
-          defaultParams: {
-            engine: 'three_js',
-            export_format: 'png',
-            dpi: 300,
-            description: 'Generate precision mockups using Three.js/Canvas rendering pipeline. PKG Evaluator acts as Director, Three.js/Canvas Engine acts as Cutter/Printer.',
-            agent_behavior: ['background_loop', 'task_filter']
-          }
-        })
-      });
-      
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || `Registration failed: ${response.statusText}`);
-      }
-      
-      const result = await response.json();
-      setRenderingCapabilityRegistered(true);
-      appendLog(`✅ Registered rendering capability: generate_precision_mockups (subtask type ID: ${result.id})`);
-    } catch (error: any) {
-      appendLog(`❌ Failed to register rendering capability: ${error?.message || String(error)}`);
-    } finally {
-      setIsRegisteringRendering(false);
-    }
-  };
-  
-  // Check if emission has rendering params
-  const hasRenderingParams = (params?: any): boolean => {
-    if (!params) return false;
-    return !!(params.artwork_uri || params.placement_anchor || params.scale !== undefined || params.warp_profile);
-  };
-  
-  // Extract rendering params from emission
-  const getRenderingParams = (params?: any) => {
-    if (!params) return null;
-    return {
-      artwork_uri: params.artwork_uri,
-      placement_anchor: params.placement_anchor,
-      scale: params.scale,
-      warp_profile: params.warp_profile,
-    };
-  };
-
-  const appendLog = (message: string) => {
-    setLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${message}`]);
-  };
-
-  const handleCancel = () => {
-    abortRef.current?.abort();
-    abortRef.current = null;
-    appendLog("Cancel requested.");
-    setIsRunning(false);
-  };
-
-  const handleExport = () => {
-    const blob = new Blob([JSON.stringify(results, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `seed-results-${Date.now()}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
+  // 1. Facts Summary (Constraint: < 10 items)
+  const hotelFacts = [
+    "Orchestrates 4 Creative Zones (Journey, Gift, Wear, Kids)",
+    "Manages Smart HVAC & Environmental setpoints per zone",
+    "Automates Door Access & Security based on Persona",
+    "Smart Elevator Routing with Priority Handling",
+    "Enforces Safety-First Policy for Magic Atelier (KIDS)",
+    "Validates Hardware Constraints via Digital Twin Critic",
+    "Archives Events into Unified Cortex Memory Tiers"
+  ];
 
   const handleGenerate = async () => {
-    if (isRunning) return;
-
-    const total = clamp(Number(count) || 1, 1, 50);
-    setCount(total);
-
     setIsRunning(true);
-    setResults([]);
-    setLogs([]);
-    setProgress({ done: 0, total });
-
-    const controller = new AbortController();
-    abortRef.current = controller;
-
+    setLogs(["[SYSTEM] Initializing Multi-Zone Simulation..."]);
+    
     try {
-      appendLog("Starting seed generation...");
-
-      // We pass options in a backward-compatible way:
-      // if your seedDataService ignores unknown fields, this won’t break.
-      const generated: SeedResult[] = await seedDataService.generateSeeds({
-        count: total,
-        dbProxyUrl,
-        includeKnowledgeBase: includeKnowledge,
-        profile, // scene-aware seed profile
-        mode: writeMode, // dry_run | event_working | event_then_approve
-        signal: controller.signal, // for fetch abort support (if implemented)
-        onProgress: (done: number, totalN: number) => setProgress({ done, total: totalN }), // if supported
-      } as any);
-
-      appendLog(`Seed generation complete (${generated.length} items). Normalizing + hashing...`);
-
-      // Normalize + compute dedupe hash (client-side)
-      const normalized: NormalizedSeed[] = [];
-      for (let i = 0; i < generated.length; i++) {
-        const n = normalizeSeed(generated[i]);
-        // Canonical-ish hash from the ticket/payload
-        const basis = (n as any)?.ticket ? (n as any).ticket : n;
-        n.seedHash = await sha256Hex(safeJsonStringify(basis));
-        // Intended tier by mode
-        n.memoryTierIntended =
-          writeMode === "event_working" || writeMode === "event_then_approve"
-            ? "event_working"
-            : "event_working";
-        
-        // Step 5: Run Digital Twin validation if snapshot and rules are available
-        if (snapshot && rules.length > 0 && n.allowed && n.emissions && n.emissions.length > 0) {
-          try {
-            // Create a mock rule from the seed for validation
-            const mockRule: Rule = {
-              id: `seed-${n.seedHash}`,
-              snapshotId: snapshot.id!,
-              ruleName: `Seed: ${n.title || 'Untitled'}`,
-              priority: 100,
-              engine: 'wasm' as any,
-              disabled: false,
-              conditions: [],
-              emissions: n.emissions.map((e: any) => ({
-                ruleId: `seed-${n.seedHash}`,
-                subtaskTypeId: `mock-${e.subtaskName}`,
-                subtaskName: e.subtaskName,
-                relationshipType: e.relationshipType as any,
-                params: e.params,
-              })),
-            };
-            
-            const criticResult = await validateRulesWithDigitalTwin([mockRule], snapshot);
-            n.criticReport = criticResult;
-            
-            if (!criticResult.passed) {
-              appendLog(`⚠️ Critic flagged seed "${n.title}": ${criticResult.issues[0]?.issue || 'Hardware constraint violation'}`);
-            }
-          } catch (error) {
-            console.warn('Digital Twin validation failed for seed:', error);
-            // Continue without critic report
-          }
-        }
-        
-        normalized.push(n);
-        setProgress((p) => ({ ...p, done: i + 1 }));
-      }
-
-      // Basic local dedupe: keep first instance of same seedHash
-      const seen = new Set<string>();
-      const deduped = normalized.filter((x) => {
-        const k = x.seedHash || "";
-        if (!k) return true;
-        if (seen.has(k)) return false;
-        seen.add(k);
-        return true;
+      const generated = await seedDataService.generateSeeds({
+        count,
+        profile,
+        dbProxyUrl: DEFAULT_DB_PROXY,
+        mode: writeMode,
+        includeKnowledgeBase: false, // Can be made configurable later
       });
 
-      if (deduped.length !== normalized.length) {
-        appendLog(`Deduped ${normalized.length - deduped.length} duplicates by seedHash.`);
-      }
-
-      setResults(deduped);
-
-      // Guidance log depending on write mode
-      if (writeMode === "dry_run") {
-        appendLog("Dry-run mode: policy evaluated, nothing written to memory.");
-      } else if (writeMode === "event_working") {
-        appendLog("Write mode: allowed items should be written to event_working (tasks + multimodal embeddings).");
-      } else {
-        appendLog("Write mode: allowed items written to event_working; you can later APPROVE to promote into knowledge_base.");
-      }
-    } catch (error: any) {
-      if (error?.name === "AbortError") {
-        appendLog("Run aborted.");
-      } else {
-        appendLog(`Error: ${error?.message || String(error)}`);
-      }
+      setResults(generated.map(processSeed));
+      setLogs(prev => [...prev, `[SUCCESS] Generated ${generated.length} seeds for ${profile}`]);
+    } catch (e: any) {
+      setLogs(prev => [...prev, `[ERROR] ${e.message}`]);
     } finally {
-      abortRef.current = null;
       setIsRunning(false);
     }
   };
 
-  // Approve & Promote: Wire to backend promotion endpoint
-  const handleApproveAndPromote = async (seed: NormalizedSeed) => {
-    if (!seed.seedHash || !seed.id) {
-      appendLog(`⚠️ Cannot promote seed: missing seedHash or id`);
-      return;
-    }
-    
-    if (!seed.allowed) {
-      appendLog(`⚠️ Cannot promote blocked seed: ${seed.title || seed.seedHash}`);
-      return;
-    }
-    
-    // Check if critic flagged critical issues
-    if (seed.criticReport && !seed.criticReport.passed) {
-      const criticalIssues = seed.criticReport.issues.filter(i => i.severity === 'critical');
-      if (criticalIssues.length > 0) {
-        appendLog(`⚠️ Cannot promote seed with critical hardware violations: ${seed.title || seed.seedHash}`);
-        return;
-      }
-    }
-    
-    try {
-      appendLog(`Promoting seed "${seed.title || seed.seedHash}" to knowledge_base...`);
-      
-      const response = await fetch(`${dbProxyUrl}/api/memory/promote`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          taskId: seed.id,
-          seedHash: seed.seedHash,
-          label: 'wearable.ticket',
-          actor: 'user', // Could be enhanced to track actual user
-          snapshotId: snapshot?.id || null,
-          deleteSource: true // Clean up event_working after promotion
-        })
-      });
-      
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || `Promotion failed: ${response.statusText}`);
-      }
-      
-      const result = await response.json();
-      
-      // Update UI state to reflect promotion
-      setResults((prev) =>
-        prev.map((x) =>
-          x.seedHash === seed.seedHash
-            ? {
-                ...x,
-                memoryTierIntended: 'knowledge_base' as const,
-                written: true,
-                id: result.nodeId, // Update to new node_id
-              }
-            : x
-        )
-      );
-      
-      appendLog(`✅ Successfully promoted seed to knowledge_base as node ${result.nodeId}`);
-    } catch (error: any) {
-      appendLog(`❌ Promotion failed: ${error?.message || String(error)}`);
-    }
-  };
+  function processSeed(seed: SeedResult): SeedResult {
+    // SeedResult now includes isSafety, isHvac, and zone from the service
+    // No need to recompute, but ensure they're set
+    return seed;
+  }
   
-  // Client-side "approval" toggle (for UI state only, actual promotion via handleApproveAndPromote)
-  const toggleApprove = (seedHash?: string) => {
-    if (!seedHash) return;
-    const seed = results.find(r => r.seedHash === seedHash);
-    if (seed) {
-      // If toggling to knowledge_base, trigger actual promotion
-      if (seed.memoryTierIntended !== 'knowledge_base') {
-        handleApproveAndPromote(seed);
-      } else {
-        // Toggling back to event_working (just UI state change)
-        setResults((prev) =>
-          prev.map((x) =>
-            x.seedHash === seedHash
-              ? {
-                  ...x,
-                  memoryTierIntended: 'event_working' as const,
-                }
-              : x
-          )
-        );
-      }
-    }
-  };
-
-  const TierPill = ({ tier }: { tier?: string }) => {
-    if (tier === "knowledge_base") {
-      return (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200">
-          <Brain className="h-3 w-3" /> knowledge_base
-        </span>
-      );
-    }
-    return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-50 text-amber-700 border border-amber-200">
-        <Zap className="h-3 w-3" /> event_working
-      </span>
-    );
-  };
-
-  // Step 5: Critic Report Component
-  const CriticIndicator = ({ seed }: { seed: NormalizedSeed }) => {
-    if (!seed.criticReport) return null;
-    
-    const { passed, issues, validationScore } = seed.criticReport;
-    const hasCriticalIssues = issues.some(i => i.severity === "critical");
-    
-    return (
-      <div className="relative group">
-        <button
-          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border ${
-            hasCriticalIssues
-              ? "bg-red-50 text-red-700 border-red-200"
-              : passed
-              ? "bg-green-50 text-green-700 border-green-200"
-              : "bg-yellow-50 text-yellow-700 border-yellow-200"
-          }`}
-          title={`Critic Score: ${(validationScore * 100).toFixed(0)}%`}
-        >
-          <AlertTriangle className="h-3 w-3" />
-          {hasCriticalIssues ? "Critical" : passed ? "Valid" : "Warning"}
-        </button>
-        
-        {/* Tooltip */}
-        <div className="absolute left-0 bottom-full mb-2 hidden group-hover:block z-50 w-64 bg-gray-900 text-white text-xs rounded-lg p-3 shadow-xl">
-          <div className="font-semibold mb-2">Digital Twin Validation</div>
-          <div className="mb-2">Score: {(validationScore * 100).toFixed(1)}%</div>
-          {issues.length > 0 && (
-            <div className="space-y-1">
-              {issues.slice(0, 3).map((issue, idx) => (
-                <div key={idx} className={`text-xs ${
-                  issue.severity === "critical" ? "text-red-300" :
-                  issue.severity === "warning" ? "text-yellow-300" :
-                  "text-gray-300"
-                }`}>
-                  • {issue.issue}
-                  {issue.recommendation && (
-                    <div className="text-gray-400 ml-2 mt-0.5">→ {issue.recommendation}</div>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  };
-
-  // Step 6: Temporal Validity Component
-  const ValidityIndicator = ({ seed }: { seed: NormalizedSeed }) => {
-    if (!seed.validity) return <span className="text-xs text-gray-400">—</span>;
-    
-    const { from, to } = seed.validity;
-    const now = new Date();
-    const fromDate = new Date(from);
-    const toDate = to ? new Date(to) : null;
-    
-    if (toDate) {
-      const totalMs = toDate.getTime() - fromDate.getTime();
-      const elapsedMs = now.getTime() - fromDate.getTime();
-      const remainingMs = toDate.getTime() - now.getTime();
-      const progress = Math.max(0, Math.min(100, (elapsedMs / totalMs) * 100));
-      
-      const hoursRemaining = remainingMs / (1000 * 60 * 60);
-      const isExpired = remainingMs < 0;
-      const isCritical = hoursRemaining > 0 && hoursRemaining < 1;
-      
-      return (
-        <div className="space-y-1">
-          <div className="flex items-center gap-2 text-xs">
-            <Clock className={`h-3 w-3 ${isExpired ? "text-red-500" : isCritical ? "text-yellow-500" : "text-gray-400"}`} />
-            <span className={isExpired ? "text-red-600" : isCritical ? "text-yellow-600" : "text-gray-600"}>
-              {isExpired ? "Expired" : isCritical ? `${Math.round(hoursRemaining * 60)}m left` : `${Math.round(hoursRemaining)}h left`}
-            </span>
-          </div>
-          <div className="w-full bg-gray-200 rounded-full h-1.5">
-            <div
-              className={`h-1.5 rounded-full ${
-                isExpired ? "bg-red-500" : isCritical ? "bg-yellow-500" : "bg-blue-500"
-              }`}
-              style={{ width: `${Math.max(0, Math.min(100, progress))}%` }}
-            />
-          </div>
-          <div className="text-xs text-gray-500">
-            {fromDate.toLocaleDateString()} → {toDate.toLocaleDateString()}
-          </div>
-        </div>
-      );
-    }
-    
-    // Indefinite validity
-    return (
-      <div className="flex items-center gap-1 text-xs text-gray-600">
-        <CheckCircle2 className="h-3 w-3 text-green-500" />
-        <span>Indefinite</span>
-      </div>
-    );
-  };
-
-  // Emission Blueprint Component
-  const EmissionBlueprint = ({ emissions }: { emissions?: Array<any> }) => {
-    if (!emissions || emissions.length === 0) {
-      return <span className="text-xs text-gray-400">No emissions</span>;
-    }
-    
-    const hasRendering = emissions.some(e => hasRenderingParams(e.params) || e.subtaskName === 'generate_precision_mockups');
-    
-    return (
-      <div className="flex flex-wrap gap-1 items-center">
-        {emissions.map((e, i) => (
-          <span
-            key={i}
-            className={`px-1.5 py-0.5 rounded text-[10px] font-bold border flex items-center gap-1 ${
-              e.relationshipType === "GATE"
-                ? "bg-red-100 border-red-200 text-red-700"
-                : e.relationshipType === "ORDERS"
-                ? "bg-blue-100 border-blue-200 text-blue-700"
-                : "bg-gray-100 border-gray-200 text-gray-700"
-            }`}
-            title={JSON.stringify(e.params || {}, null, 2)}
-          >
-            {e.relationshipType}
-            {(hasRenderingParams(e.params) || e.subtaskName === 'generate_precision_mockups') && (
-              <span title="Rendering pipeline emission">
-                <Image className="h-3 w-3" />
-              </span>
-            )}
-          </span>
-        ))}
-        {hasRendering && (
-          <span className="text-[10px] text-purple-600 font-semibold flex items-center gap-1" title="Data-Driven Rendering Pipeline">
-            <Layers className="h-3 w-3" />
-            Rendering
-          </span>
-        )}
-      </div>
-    );
-  };
-
-  // Emission Blueprint Modal
-  const EmissionBlueprintModal = ({ seed, onClose }: { seed: NormalizedSeed | null; onClose: () => void }) => {
-    if (!seed || !seed.emissions || seed.emissions.length === 0) return null;
-    
-    return (
-      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" onClick={onClose}>
-        <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full m-4 max-h-[80vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-          <div className="p-6 border-b border-gray-200 flex items-center justify-between">
-            <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-              <Workflow className="h-5 w-5" />
-              Emission Blueprint: {seed.title || "Untitled Seed"}
-            </h3>
-            <button
-              onClick={onClose}
-              className="text-gray-400 hover:text-gray-600"
-            >
-              <XCircle className="h-5 w-5" />
-            </button>
-          </div>
-          
-          <div className="p-6 space-y-4">
-            <div className="text-sm text-gray-600 mb-4">
-              Task DAG (Directed Acyclic Graph) that would be triggered by this seed:
-            </div>
-            
-            <div className="space-y-3">
-              {seed.emissions
-                .sort((a, b) => (a.position || 0) - (b.position || 0))
-                .map((emission, idx) => (
-                  <div
-                    key={idx}
-                    className={`p-4 rounded-lg border-2 ${
-                      emission.relationshipType === "GATE"
-                        ? "border-red-300 bg-red-50"
-                        : emission.relationshipType === "ORDERS"
-                        ? "border-blue-300 bg-blue-50"
-                        : "border-gray-300 bg-gray-50"
-                    }`}
-                  >
-                    <div className="flex items-start justify-between mb-2">
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-mono bg-white px-2 py-1 rounded">
-                          {idx + 1}
-                        </span>
-                        <span className={`font-semibold ${
-                          emission.relationshipType === "GATE" ? "text-red-700" :
-                          emission.relationshipType === "ORDERS" ? "text-blue-700" :
-                          "text-gray-700"
-                        }`}>
-                          {emission.relationshipType}
-                        </span>
-                      </div>
-                      <span className="text-sm font-medium text-gray-700">
-                        {emission.subtaskName}
-                      </span>
-                    </div>
-                    
-                    {emission.params && Object.keys(emission.params).length > 0 && (
-                      <div className="mt-2 space-y-2">
-                        {/* Rendering Pipeline Params */}
-                        {hasRenderingParams(emission.params) && (
-                          <div className="bg-purple-50 border border-purple-200 rounded p-3 mb-2">
-                            <div className="flex items-center gap-2 mb-2">
-                              <Layers className="h-4 w-4 text-purple-600" />
-                              <span className="font-semibold text-purple-900 text-xs">Data-Driven Rendering Pipeline</span>
-                            </div>
-                            <div className="grid grid-cols-2 gap-2 text-xs">
-                              {emission.params.artwork_uri && (
-                                <div>
-                                  <span className="font-medium text-purple-700">Artwork URI:</span>
-                                  <div className="text-purple-900 font-mono break-all">{emission.params.artwork_uri}</div>
-                                </div>
-                              )}
-                              {emission.params.placement_anchor && (
-                                <div>
-                                  <span className="font-medium text-purple-700">Placement:</span>
-                                  <div className="text-purple-900">{emission.params.placement_anchor}</div>
-                                </div>
-                              )}
-                              {emission.params.scale !== undefined && (
-                                <div>
-                                  <span className="font-medium text-purple-700">Scale:</span>
-                                  <div className="text-purple-900">{(emission.params.scale * 100).toFixed(0)}%</div>
-                                </div>
-                              )}
-                              {emission.params.warp_profile && (
-                                <div>
-                                  <span className="font-medium text-purple-700">Warp Profile:</span>
-                                  <div className="text-purple-900">{emission.params.warp_profile}</div>
-                                </div>
-                              )}
-                            </div>
-                            <div className="mt-2 text-[10px] text-purple-700 italic">
-                              PKG Evaluator (Director) → Three.js/Canvas Engine (Cutter/Printer)
-                            </div>
-                          </div>
-                        )}
-                        
-                        {/* All Parameters */}
-                        <div>
-                          <div className="font-medium text-gray-600 mb-1">All Parameters:</div>
-                          <pre className="bg-white p-2 rounded border border-gray-200 overflow-x-auto text-xs">
-                            {JSON.stringify(emission.params, null, 2)}
-                          </pre>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                ))}
-            </div>
-            
-            <div className="mt-4 space-y-2">
-              <div className="p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-800">
-                <strong>Note:</strong> This blueprint shows the sequence of subtasks that would be executed if this seed is approved. 
-                GATE emissions block execution, ORDERS emissions trigger actions, and EMITS emissions send notifications.
-              </div>
-              
-              {seed.emissions.some(e => hasRenderingParams(e.params) || e.subtaskName === 'generate_precision_mockups') && (
-                <div className="p-3 bg-purple-50 border border-purple-200 rounded-lg text-xs text-purple-800">
-                  <strong>🎨 Rendering Pipeline:</strong> Emissions with rendering params (artwork_uri, placement_anchor, scale, warp_profile) 
-                  trigger the Data-Driven Rendering Pipeline where PKG Evaluator acts as Director and Three.js/Canvas Engine acts as Cutter/Printer.
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-    );
+  // Helper to get zone icon and color
+  const getZoneInfo = (zone?: string) => {
+    const zoneData = ZONES.find(z => z.id === zone);
+    return zoneData || { icon: Database, color: "text-slate-400", name: zone || "Unknown" };
   };
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="bg-white shadow rounded-lg p-6 border border-gray-100">
-        <div className="flex items-start justify-between gap-4">
+    <div className="max-w-7xl mx-auto p-6 space-y-6 bg-gray-50 min-h-screen font-sans">
+      {/* Header & Core Facts */}
+      <div className="bg-white p-8 rounded-2xl shadow-sm border border-gray-200">
+        <div className="flex justify-between items-start">
           <div>
-            <p className="text-xs text-gray-500 uppercase tracking-wide font-semibold mb-1">PKG Simulator</p>
-            <h2 className="text-2xl font-bold text-gray-900 mb-2">Wearable Seed Generator</h2>
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-gray-100 text-gray-700">
-                <Database className="h-4 w-4" />
-                Unified Cortex Memory bootstrap
-              </span>
-              <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200">
-                <Shield className="h-4 w-4" />
-                PKG policy gate
-              </span>
+            <h1 className="text-3xl font-bold text-slate-900">SeedCore Scenario Generator</h1>
+            <p className="text-slate-500 mt-2">Simulation Engine for Hotel 2030+ Operations</p>
+            <div className="grid grid-cols-2 gap-x-8 gap-y-2 mt-6">
+              {hotelFacts.map((fact, i) => (
+                <div key={i} className="flex items-center gap-2 text-sm text-slate-600">
+                  <CheckCircle2 className="h-4 w-4 text-green-500" /> {fact}
+                </div>
+              ))}
             </div>
           </div>
-
-          <div className="text-right">
-            {isRunning ? (
-              <div className="text-xs text-gray-500">
-                Progress: <span className="font-mono">{progress.done}/{progress.total}</span>
-              </div>
-            ) : (
-              <div className="text-xs text-gray-500">Ready</div>
-            )}
+          <div className="bg-indigo-600 text-white p-4 rounded-xl text-center min-w-[120px]">
+            <div className="text-2xl font-bold">{results.length}</div>
+            <div className="text-xs opacity-80">Active Seeds</div>
           </div>
         </div>
-
-        {isRunning && (
-          <div className="mt-4">
-            <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden">
-              <div
-                className="h-2 bg-indigo-600"
-                style={{
-                  width: `${progress.total ? Math.round((progress.done / progress.total) * 100) : 0}%`,
-                }}
-              />
-            </div>
-          </div>
-        )}
       </div>
 
-      {/* Config */}
-      <div className="bg-white shadow rounded-lg p-6 border border-gray-100">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Seed Count</label>
-            <input
-              type="number"
-              min={1}
-              max={50}
-              value={count}
-              onChange={(e) => setCount(clamp(Number(e.target.value) || 1, 1, 50))}
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+      {/* Control Panel - Zone Selection */}
+      <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
+        <label className="block text-xs font-bold text-slate-500 uppercase mb-4">Select Zone Profile</label>
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+          {ZONES.map((zone) => {
+            const isSelected = profile === zone.id;
+            const isInfrastructure = zone.id === "INFRASTRUCTURE";
+            return (
+              <button
+                key={zone.id}
+                onClick={() => setProfile(zone.id as SeedProfile)}
+                className={`p-4 rounded-xl border-2 transition-all flex flex-col items-center gap-3 ${
+                  isSelected 
+                    ? "border-indigo-500 bg-white shadow-md scale-105" 
+                    : "border-transparent bg-white/50 hover:bg-white hover:border-gray-200"
+                }`}
+              >
+                <zone.icon className={`h-8 w-8 ${zone.color}`} />
+                <span className="font-bold text-slate-800 text-sm text-center">{zone.name}</span>
+                {isInfrastructure && (
+                  <span className="text-[10px] text-slate-500">HVAC • Elevators • Doors</span>
+                )}
+                {zone.id === "KIDS" && (
+                  <span className="text-[10px] text-rose-500">Safety Monitoring</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
+        <div className="flex flex-wrap gap-6 items-end">
+          <div className="flex-1 min-w-[200px]">
+            <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Simulation Volume</label>
+            <input 
+              type="range" min="1" max="50" value={count} 
+              onChange={(e) => setCount(parseInt(e.target.value))}
+              className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
             />
-            <p className="mt-1 text-xs text-gray-500">Recommended: 8–20 for good coverage without noise.</p>
+            <div className="flex justify-between text-[10px] font-mono mt-2 text-slate-400">
+              <span>1 UNIT</span>
+              <span>CURRENT: {count}</span>
+              <span>50 UNITS</span>
+            </div>
           </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">DB Proxy URL</label>
-            <input
-              value={dbProxyUrl}
-              onChange={(e) => setDbProxyUrl(e.target.value)}
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-            />
-            <p className="mt-1 text-xs text-gray-500">Points to your db-proxy that writes tasks/embeddings.</p>
-          </div>
+          <button
+            onClick={handleGenerate}
+            disabled={isRunning}
+            className="bg-slate-900 text-white px-8 py-3 rounded-xl font-bold flex items-center gap-2 hover:bg-slate-800 disabled:opacity-50"
+          >
+            {isRunning ? <Loader2 className="h-5 w-5 animate-spin" /> : <Play className="h-5 w-5" />}
+            Ignite Scenario
+          </button>
+        </div>
+      </div>
 
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Seed Profile</label>
-            <select
-              value={profile}
-              onChange={(e) => setProfile(e.target.value as SeedProfile)}
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-            >
-              <option value="wearable_story">WearableStoryStudio</option>
-              <option value="magic_atelier">MagicAtelier</option>
-              <option value="journey_studio">JourneyStudio</option>
-              <option value="mixed">Mixed batch</option>
-            </select>
-            <p className="mt-1 text-xs text-gray-500">Aligns generations with your three scenes.</p>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Knowledge Base Seed</label>
-            <select
-              value={includeKnowledge ? "yes" : "no"}
-              onChange={(e) => setIncludeKnowledge(e.target.value === "yes")}
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-            >
-              <option value="yes">Include approved tickets</option>
-              <option value="no">Working memory only</option>
-            </select>
-            <p className="mt-1 text-xs text-gray-500">If “yes”, Gemini can reference prior approved designs.</p>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Write Mode</label>
-            <select
-              value={writeMode}
-              onChange={(e) => setWriteMode(e.target.value as MemoryWriteMode)}
-              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-            >
-              <option value="dry_run">Dry run (policy only)</option>
-              <option value="event_working">Write allowed → event_working</option>
-              <option value="event_then_approve">Write allowed → event_working, then approve → knowledge_base</option>
-            </select>
-            <p className="mt-1 text-xs text-gray-500">
-              Matches your view tiers: event_working = tasks+multimodal; knowledge_base = graph embeddings.
-            </p>
-          </div>
-
-          <div className="flex items-end gap-3">
-            <button
-              onClick={handleGenerate}
-              disabled={isRunning}
-              className="flex-1 inline-flex justify-center items-center gap-2 px-6 py-3 bg-indigo-600 text-white font-semibold rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              {isRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-              {isRunning ? "Generating..." : "Generate Seeds"}
-            </button>
-
-            <button
-              onClick={handleCancel}
-              disabled={!isRunning}
-              className="inline-flex justify-center items-center gap-2 px-4 py-3 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-              title="Cancel run"
-            >
-              <XCircle className="h-4 w-4" />
-            </button>
-
-            <button
-              onClick={handleExport}
-              disabled={!results.length}
-              className="inline-flex justify-center items-center gap-2 px-4 py-3 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-              title="Export JSON"
-            >
-              <Download className="h-4 w-4" />
-            </button>
-          </div>
-          
-          {/* Rendering Pipeline Capability */}
-          {snapshot && (
-            <div className="mt-4 p-4 bg-purple-50 border border-purple-200 rounded-lg">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Layers className="h-5 w-5 text-purple-600" />
-                  <div>
-                    <div className="text-sm font-semibold text-purple-900">Data-Driven Rendering Pipeline</div>
-                    <div className="text-xs text-purple-700">
-                      {renderingCapabilityRegistered 
-                        ? "Rendering capability registered (generate_precision_mockups)"
-                        : "Register rendering capability for active snapshot"}
+      {/* Results Table */}
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+        <table className="w-full text-left border-collapse">
+          <thead>
+            <tr className="bg-slate-50 border-b border-gray-200">
+              <th className="p-4 text-xs font-bold text-slate-500 uppercase">Context</th>
+              <th className="p-4 text-xs font-bold text-slate-500 uppercase">Zone / Intent</th>
+              <th className="p-4 text-xs font-bold text-slate-500 uppercase">Operation</th>
+              <th className="p-4 text-xs font-bold text-slate-500 uppercase">Policy Gate</th>
+              <th className="p-4 text-xs font-bold text-slate-500 uppercase">Emissions</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100">
+            {results.map((res, i) => {
+              const zoneInfo = getZoneInfo(res.zone);
+              const ZoneIcon = zoneInfo.icon;
+              const isInfrastructure = profile === "INFRASTRUCTURE" || ('operation' in res.intent);
+              
+              return (
+                <tr key={i} className="hover:bg-slate-50/50 transition-colors">
+                  <td className="p-4">
+                    <div className="flex items-center gap-2">
+                      {res.isSafety ? (
+                        <Shield className="h-5 w-5 text-rose-500" />
+                      ) : isInfrastructure ? (
+                        <Wind className="h-5 w-5 text-slate-500" />
+                      ) : (
+                        <Database className="h-5 w-5 text-indigo-400" />
+                      )}
                     </div>
-                  </div>
-                </div>
-                {!renderingCapabilityRegistered && (
-                  <button
-                    onClick={registerRenderingCapability}
-                    disabled={isRegisteringRendering || !snapshot}
-                    className="inline-flex items-center gap-2 px-4 py-2 bg-purple-600 text-white text-sm font-semibold rounded-lg hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                  >
-                    {isRegisteringRendering ? (
-                      <>
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                        Registering...
-                      </>
-                    ) : (
-                      <>
-                        <Settings className="h-4 w-4" />
-                        Register Capability
-                      </>
+                  </td>
+                  <td className="p-4">
+                    <div className="flex items-center gap-2">
+                      <ZoneIcon className={`h-4 w-4 ${zoneInfo.color}`} />
+                      <span className="text-xs font-semibold text-slate-600">{res.zone || profile}</span>
+                    </div>
+                    <div className="text-xs text-slate-500 mt-1">Tier: {writeMode}</div>
+                  </td>
+                  <td className="p-4">
+                    <div className="font-bold text-slate-900">{res.title || "Operation"}</div>
+                    {isInfrastructure && 'operation' in res.intent && (
+                      <div className="text-xs text-slate-500 mt-1">
+                        {res.intent.systemType} • Priority: {res.intent.priority}
+                      </div>
                     )}
-                  </button>
-                )}
-                {renderingCapabilityRegistered && (
-                  <span className="inline-flex items-center gap-1 px-3 py-1 bg-green-100 text-green-700 text-xs font-semibold rounded-full">
-                    <CheckCircle2 className="h-3 w-3" />
-                    Ready
-                  </span>
-                )}
-              </div>
-              {renderingCapabilityRegistered && (
-                <div className="mt-3 text-xs text-purple-800 space-y-1">
-                  <div><strong>Subtask Type:</strong> generate_precision_mockups</div>
-                  <div><strong>Engine:</strong> three_js</div>
-                  <div><strong>Export Format:</strong> png</div>
-                  <div><strong>DPI:</strong> 300</div>
-                  <div className="mt-2 italic">
-                    PKG Evaluator (Director) → Three.js/Canvas Engine (Cutter/Printer)
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        {summary && (
-          <div className="mt-6 p-4 bg-green-50 border border-green-200 rounded-lg">
-            <p className="text-sm text-green-800">{summary}</p>
-          </div>
-        )}
-
-        {logs.length > 0 && (
-          <div className="mt-6 p-4 bg-gray-900 text-gray-100 rounded-lg font-mono text-xs overflow-auto max-h-80">
-            <pre className="whitespace-pre-wrap">{logs.join("\n")}</pre>
-          </div>
-        )}
-      </div>
-
-      {/* Results */}
-      <div className="bg-white shadow rounded-lg border border-gray-100 overflow-hidden">
-        <div className="px-6 py-4 border-b border-gray-200 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <h3 className="text-lg font-semibold text-gray-900">Seed Results</h3>
-            <span className="text-xs text-gray-500">({filtered.length}/{results.length})</span>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <div className="relative">
-              <Search className="h-4 w-4 text-gray-400 absolute left-3 top-3" />
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search payload…"
-                className="pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-              />
-            </div>
-
-            <label className="inline-flex items-center gap-2 text-sm text-gray-700">
-              <input
-                type="checkbox"
-                checked={showOnlyAllowed}
-                onChange={(e) => setShowOnlyAllowed(e.target.checked)}
-              />
-              Allowed only
-            </label>
-          </div>
-        </div>
-
-        {results.length === 0 ? (
-          <div className="p-10 text-center text-gray-500">No seeds yet. Generate a batch to populate working memory.</div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200 text-sm">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Decision</th>
-                  <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Title</th>
-                  <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Tier</th>
-                  <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Seed Hash</th>
-                  <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Reason</th>
-                  {writeMode === "event_then_approve" && (
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Approve</th>
-                  )}
+                  </td>
+                  <td className="p-4">
+                    <span className={`px-3 py-1 rounded-full text-[10px] font-bold ${
+                      res.allowed !== false ? "bg-green-100 text-green-700" : "bg-rose-100 text-rose-700"
+                    }`}>
+                      {res.allowed !== false ? "VALIDATED" : "REJECTED"}
+                    </span>
+                  </td>
+                  <td className="p-4">
+                    <div className="flex gap-2 items-center">
+                      {res.isHvac && <Wind className="h-4 w-4 text-sky-500" />}
+                      {res.isSafety && <Shield className="h-4 w-4 text-rose-500" />}
+                      {isInfrastructure && <ArrowUpDown className="h-4 w-4 text-slate-400" />}
+                      {!isInfrastructure && <Layers className="h-4 w-4 text-indigo-400" />}
+                    </div>
+                  </td>
                 </tr>
-              </thead>
-
-              <tbody className="bg-white divide-y divide-gray-200">
-                {filtered.map((r) => (
-                  <tr key={r.seedHash || r.id || Math.random()}>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      {r.allowed ? (
-                        <span className="inline-flex items-center gap-1 text-green-700 bg-green-50 border border-green-200 px-2 py-0.5 rounded-full text-xs font-semibold">
-                          <CheckCircle2 className="h-3 w-3" /> Allowed
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 text-red-700 bg-red-50 border border-red-200 px-2 py-0.5 rounded-full text-xs font-semibold">
-                          <XCircle className="h-3 w-3" /> Blocked
-                        </span>
-                      )}
-                    </td>
-
-                    {/* Step 5: Critic Indicator */}
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      {r.allowed ? (
-                        <CriticIndicator seed={r} />
-                      ) : (
-                        <span className="text-xs text-gray-400">—</span>
-                      )}
-                    </td>
-
-                    <td className="px-6 py-4">
-                      <div className="font-medium text-gray-900">{r.title || "Untitled ticket"}</div>
-                      <div className="text-xs text-gray-500 font-mono">{r.id ? `id=${r.id}` : ""}</div>
-                    </td>
-
-                    {/* Step 6: Temporal Validity */}
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <ValidityIndicator seed={r} />
-                    </td>
-
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <TierPill tier={r.memoryTierIntended} />
-                    </td>
-
-                    {/* Emission Blueprint */}
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      {r.emissions && r.emissions.length > 0 ? (
-                        <div className="flex items-center gap-2">
-                          <EmissionBlueprint emissions={r.emissions} />
-                          <button
-                            onClick={() => setSelectedBlueprint(r)}
-                            className="text-blue-600 hover:text-blue-800"
-                            title="View full blueprint"
-                          >
-                            <Eye className="h-4 w-4" />
-                          </button>
-                        </div>
-                      ) : (
-                        <span className="text-xs text-gray-400">—</span>
-                      )}
-                    </td>
-
-                    <td className="px-6 py-4 whitespace-nowrap font-mono text-xs text-gray-600">
-                      {r.seedHash ? r.seedHash.slice(0, 12) + "…" : "—"}
-                    </td>
-
-                    <td className="px-6 py-4 text-gray-700 max-w-xl">
-                      <span className="text-xs">{r.reason}</span>
-                    </td>
-
-                    {writeMode === "event_then_approve" && (
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <button
-                          disabled={!r.allowed || (r.criticReport && !r.criticReport.passed && r.criticReport.issues.some(i => i.severity === 'critical'))}
-                          onClick={() => toggleApprove(r.seedHash)}
-                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors ${
-                            !r.allowed
-                              ? "bg-gray-50 text-gray-400 border-gray-200 cursor-not-allowed"
-                              : r.memoryTierIntended === "knowledge_base"
-                              ? "bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100"
-                              : "bg-white text-gray-700 border-gray-300 hover:bg-gray-50"
-                          }`}
-                          title={
-                            !r.allowed
-                              ? "Cannot approve blocked seed"
-                              : r.criticReport && !r.criticReport.passed && r.criticReport.issues.some(i => i.severity === 'critical')
-                              ? "Cannot approve: Critical hardware violations detected"
-                              : r.memoryTierIntended === "knowledge_base"
-                              ? "Promoted to knowledge_base (click to undo)"
-                              : "Approve & Promote to knowledge_base"
-                          }
-                        >
-                          {r.memoryTierIntended === "knowledge_base" ? (
-                            <span className="flex items-center gap-1">
-                              <CheckCircle2 className="h-3 w-3" />
-                              Promoted
-                            </span>
-                          ) : (
-                            "Approve → KB"
-                          )}
-                        </button>
-                      </td>
-                    )}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-
-            <div className="px-6 py-4 bg-gray-50 text-xs text-gray-600">
-              Tip: In production, only “Approved → KB” items should be promoted into graph embeddings (Tier B/C). Keep noisy seeds in event_working.
-            </div>
-          </div>
-        )}
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   );
 };
-
-// Export as SeedData for backward compatibility
-export const SeedData = SeedDataEnhanced;

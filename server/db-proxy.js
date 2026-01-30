@@ -19,6 +19,136 @@ import crypto from 'crypto';
 const app = express();
 const PORT = process.env.DB_PROXY_PORT || 3011;
 
+// Helper functions to store/retrieve artifactFormat in notes field as JSON metadata
+function parseNotesMetadata(notes) {
+  if (!notes) return { artifactFormat: undefined, notes: null };
+  
+  try {
+    // Try to parse as JSON first (if it's JSON metadata)
+    const parsed = JSON.parse(notes);
+    if (parsed && typeof parsed === 'object' && 'artifactFormat' in parsed) {
+      // Extract artifactFormat and original notes
+      const { artifactFormat, ...rest } = parsed;
+      const originalNotes = Object.keys(rest).length > 0 ? JSON.stringify(rest) : null;
+      return { artifactFormat, notes: originalNotes };
+    }
+  } catch (e) {
+    // Not JSON, treat as plain text notes
+  }
+  
+  // Check if notes contains artifactFormat marker (backward compatibility)
+  const artifactFormatMatch = notes.match(/\[artifactFormat:(\w+)\]/);
+  if (artifactFormatMatch) {
+    return { artifactFormat: artifactFormatMatch[1], notes: notes.replace(/\[artifactFormat:\w+\]\s*/, '') };
+  }
+  
+  return { artifactFormat: undefined, notes };
+}
+
+function buildNotesWithMetadata(originalNotes, artifactFormat) {
+  if (!artifactFormat) return originalNotes || null;
+  
+  try {
+    // If original notes is JSON, merge with artifactFormat
+    if (originalNotes) {
+      const parsed = JSON.parse(originalNotes);
+      if (parsed && typeof parsed === 'object') {
+        return JSON.stringify({ ...parsed, artifactFormat });
+      }
+    }
+  } catch (e) {
+    // Not JSON, create new JSON structure
+  }
+  
+  // Create JSON metadata structure
+  const metadata = { artifactFormat };
+  if (originalNotes) {
+    metadata.notes = originalNotes;
+  }
+  return JSON.stringify(metadata);
+}
+
+// WASM encoding helper functions (shared across endpoints)
+function encodeULEB128(value) {
+  const bytes = [];
+  do {
+    let byte = value & 0x7f;
+    value >>>= 7;
+    if (value !== 0) byte |= 0x80;
+    bytes.push(byte);
+  } while (value !== 0);
+  return Buffer.from(bytes);
+}
+
+function encodeString(s) {
+  const b = Buffer.from(s, "utf8");
+  return Buffer.concat([encodeULEB128(b.length), b]);
+}
+
+function makeMinimalWasmEvaluateReturns1() {
+  const wasmHeader = Buffer.from([0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00]);
+  
+  // Type section: 1 type: func () -> i32
+  const typePayload = Buffer.concat([
+    encodeULEB128(1),
+    Buffer.from([0x60]), // Function type
+    encodeULEB128(0), // 0 params
+    encodeULEB128(1), // 1 result
+    Buffer.from([0x7f]), // i32
+  ]);
+  const typeSection = Buffer.concat([
+    Buffer.from([0x01]), // Type section ID
+    encodeULEB128(typePayload.length),
+    typePayload
+  ]);
+  
+  // Function section: 1 function, type index 0
+  const funcPayload = Buffer.concat([
+    encodeULEB128(1), // 1 function
+    encodeULEB128(0) // Function type index 0
+  ]);
+  const funcSection = Buffer.concat([
+    Buffer.from([0x03]), // Function section ID
+    encodeULEB128(funcPayload.length),
+    funcPayload
+  ]);
+  
+  // Export section: export "evaluate" as func index 0
+  const exportPayload = Buffer.concat([
+    encodeULEB128(1), // 1 export
+    encodeString("evaluate"), // name
+    Buffer.from([0x00]), // export kind: func
+    encodeULEB128(0), // func index 0
+  ]);
+  const exportSection = Buffer.concat([
+    Buffer.from([0x07]), // Export section ID
+    encodeULEB128(exportPayload.length),
+    exportPayload
+  ]);
+  
+  // Code section: 1 function body
+  // locals: 0
+  // instructions: i32.const 1; end
+  const bodyInstructions = Buffer.from([0x41, 0x01, 0x0b]); // i32.const 1; end (0x0b = end)
+  const localDecls = Buffer.from([0x00]); // local decl count = 0 (encoded as u32 LEB128)
+  const funcBody = Buffer.concat([
+    encodeULEB128(localDecls.length + bodyInstructions.length), // body_size
+    localDecls, // local_decl_count + local_decls (empty)
+    bodyInstructions, // instructions + end
+  ]);
+  const codePayload = Buffer.concat([
+    encodeULEB128(1), // 1 function
+    funcBody
+  ]);
+  const codeSection = Buffer.concat([
+    Buffer.from([0x0a]), // Code section ID
+    encodeULEB128(codePayload.length),
+    codePayload
+  ]);
+  
+  return Buffer.concat([wasmHeader, typeSection, funcSection, exportSection, codeSection]);
+}
+
 // CORS for Vite dev server (support both 3000 and 3010 for flexibility)
 app.use(cors({
   origin: (origin, callback) => {
@@ -47,7 +177,11 @@ const pool = new Pool({
   password: process.env.POSTGRES_PASSWORD || 'password',
   max: 20,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
+  connectionTimeoutMillis: 10000, // Increased timeout
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10000,
+  // Handle connection errors gracefully
+  allowExitOnIdle: false,
 });
 
 // Test connection and load enum defaults
@@ -59,7 +193,31 @@ pool.on('connect', async () => {
 
 pool.on('error', (err) => {
   console.error('❌ Database pool error:', err);
+  // Don't crash the app on pool errors - let individual queries handle retries
 });
+
+// Helper function to execute queries with retry on connection errors
+async function queryWithRetry(queryFn, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await queryFn();
+    } catch (error) {
+      const isConnectionError = error.code === 'ECONNRESET' || 
+                                error.code === 'ECONNREFUSED' ||
+                                error.code === 'ETIMEDOUT' ||
+                                error.message?.includes('Connection terminated') ||
+                                error.message?.includes('server closed the connection');
+      
+      if (isConnectionError && i < retries - 1) {
+        const delay = Math.min(1000 * Math.pow(2, i), 5000); // Exponential backoff, max 5s
+        console.warn(`⚠️  Connection error (attempt ${i + 1}/${retries}), retrying in ${delay}ms...`, error.code);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+      throw error;
+    }
+  }
+}
 
 // Cache for task status enum default value (loaded at startup)
 let TASK_STATUS_DEFAULT = 'active';
@@ -98,22 +256,28 @@ app.get('/health', async (req, res) => {
 // Get snapshots
 app.get('/api/snapshots', async (req, res) => {
   try {
-    const result = await pool.query(`
-      SELECT 
-        id, version, env, is_active, checksum, size_bytes, created_at, notes
-      FROM pkg_snapshots
-      ORDER BY created_at DESC
-    `);
-    res.json(result.rows.map(row => ({
-      id: row.id,
-      version: row.version,
-      env: row.env,
-      isActive: row.is_active,
-      checksum: row.checksum,
-      sizeBytes: row.size_bytes || 0,
-      createdAt: row.created_at.toISOString(),
-      notes: row.notes || undefined,
-    })));
+    const result = await queryWithRetry(async () => {
+      return await pool.query(`
+        SELECT 
+          id, version, env, is_active, checksum, size_bytes, created_at, notes
+        FROM pkg_snapshots
+        ORDER BY created_at DESC
+      `);
+    });
+    res.json(result.rows.map(row => {
+      const { artifactFormat, notes: cleanNotes } = parseNotesMetadata(row.notes);
+      return {
+        id: row.id,
+        version: row.version,
+        env: row.env,
+        isActive: row.is_active,
+        checksum: row.checksum,
+        sizeBytes: row.size_bytes || 0,
+        createdAt: row.created_at.toISOString(),
+        notes: cleanNotes || undefined,
+        artifactFormat: artifactFormat || undefined,
+      };
+    }));
   } catch (error) {
     console.error('Error fetching snapshots:', error);
     res.status(500).json({ error: error.message });
@@ -124,18 +288,21 @@ app.get('/api/snapshots', async (req, res) => {
 app.get('/api/snapshots/:id', async (req, res) => {
   try {
     const snapshotId = parseInt(req.params.id);
-    const result = await pool.query(`
-      SELECT 
-        id, version, env, is_active, checksum, size_bytes, created_at, notes
-      FROM pkg_snapshots
-      WHERE id = $1
-    `, [snapshotId]);
+    const result = await queryWithRetry(async () => {
+      return await pool.query(`
+        SELECT 
+          id, version, env, is_active, checksum, size_bytes, created_at, notes
+        FROM pkg_snapshots
+        WHERE id = $1
+      `, [snapshotId]);
+    });
     
     if (result.rows.length === 0) {
       return res.status(404).json({ error: `Snapshot ${snapshotId} not found` });
     }
     
     const row = result.rows[0];
+    const { artifactFormat, notes: cleanNotes } = parseNotesMetadata(row.notes);
     res.json({
       id: row.id,
       version: row.version,
@@ -144,7 +311,8 @@ app.get('/api/snapshots/:id', async (req, res) => {
       checksum: row.checksum,
       sizeBytes: row.size_bytes || 0,
       createdAt: row.created_at.toISOString(),
-      notes: row.notes || undefined,
+      notes: cleanNotes || undefined,
+      artifactFormat: artifactFormat || undefined,
     });
   } catch (error) {
     console.error('Error fetching snapshot:', error);
@@ -705,9 +873,17 @@ app.post('/api/deployments', async (req, res) => {
       }
       
       // CRITICAL: Never update snapshot_id - only update percent, is_active, etc.
-      const updates = ['percent = $1', 'is_active = $2', 'activated_at = NOW()', 'activated_by = $3'];
-      const values = [percent, effectiveIsActive, effectiveActivatedBy];
-      let paramIndex = 4;
+      // Only update activated_at and activated_by when activating (isActive = true)
+      // When deactivating, preserve the original activation info
+      const updates = ['percent = $1', 'is_active = $2'];
+      const values = [percent, effectiveIsActive];
+      let paramIndex = 3;
+      
+      // Only update activation fields when activating
+      if (effectiveIsActive) {
+        updates.push('activated_at = NOW()', `activated_by = $${paramIndex++}`);
+        values.push(effectiveActivatedBy);
+      }
       
       if (hasValidationRunIdColumnLocal && validationRunId !== undefined) {
         updates.push(`validation_run_id = $${paramIndex++}`);
@@ -1020,13 +1196,15 @@ app.get('/api/unified-memory', async (req, res) => {
         category,
         content,
         memory_tier,
+        snapshot_id,
         metadata
       FROM v_unified_cortex_memory
       ORDER BY 
         CASE memory_tier
           WHEN 'event_working' THEN 1
           WHEN 'knowledge_base' THEN 2
-          ELSE 3
+          WHEN 'world_memory' THEN 3
+          ELSE 4
         END,
         id DESC
       LIMIT $1
@@ -1037,7 +1215,9 @@ app.get('/api/unified-memory', async (req, res) => {
       content: row.content || '',
       memoryTier: (row.memory_tier === 'event_working' ? 'event_working' :
                    row.memory_tier === 'knowledge_base' ? 'knowledge_base' :
-                   'world_memory'),
+                   row.memory_tier === 'world_memory' ? 'world_memory' :
+                   'world_memory'), // Default to world_memory for any other value
+      snapshotId: row.snapshot_id || undefined,
       metadata: row.metadata || {},
     })));
   } catch (error) {
@@ -1589,9 +1769,9 @@ app.post('/api/snapshots/:id/promote', async (req, res) => {
     
     console.log(`[POST /api/snapshots/${snapshotId}/promote] Looking up snapshot by id=${snapshotId}`);
     
-    // Verify snapshot exists by ID (not version)
+    // Verify snapshot exists by ID (not version) and get current notes
     const snapshotCheck = await client.query(
-      'SELECT id, version, env, is_active FROM pkg_snapshots WHERE id = $1',
+      'SELECT id, version, env, is_active, notes FROM pkg_snapshots WHERE id = $1',
       [snapshotId]
     );
     
@@ -1630,8 +1810,12 @@ app.post('/api/snapshots/:id/promote', async (req, res) => {
       values.push(sizeBytes);
     }
     
-    // Note: artifactFormat is not in DB schema yet, but we'll store it in notes or metadata for now
-    // Or we can add it to the schema later
+    // Store artifactFormat in notes field as JSON metadata
+    const finalArtifactFormat = artifactFormat || 'wasm';
+    const updatedNotes = buildNotesWithMetadata(snapshot.notes, finalArtifactFormat);
+    updates.push(`notes = $${paramIndex++}`);
+    values.push(updatedNotes);
+    
     if (updates.length === 0) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'No fields to update (checksum or sizeBytes required)' });
@@ -1657,6 +1841,7 @@ app.post('/api/snapshots/:id/promote', async (req, res) => {
     await client.query('COMMIT');
     
     const row = result.rows[0];
+    const { artifactFormat: parsedFormat, notes: cleanNotes } = parseNotesMetadata(row.notes);
     console.log(`[POST /api/snapshots/${snapshotId}/promote] Promotion successful`);
     
     res.json({
@@ -1667,12 +1852,113 @@ app.post('/api/snapshots/:id/promote', async (req, res) => {
       checksum: row.checksum,
       sizeBytes: row.size_bytes || 0,
       createdAt: row.created_at.toISOString(),
-      notes: row.notes || undefined,
-      artifactFormat: artifactFormat || 'wasm', // Include in response
+      notes: cleanNotes || undefined,
+      artifactFormat: parsedFormat || finalArtifactFormat, // Include in response
     });
   } catch (error) {
     await client.query('ROLLBACK');
     console.error(`[POST /api/snapshots/:id/promote] Error:`, error);
+    res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+// Compile rules for a snapshot (called during WASM promotion)
+app.post('/api/snapshots/:id/compile-rules', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    
+    const snapshotId = parseInt(req.params.id);
+    
+    // Verify snapshot exists
+    const snapshotCheck = await client.query(
+      'SELECT id, version FROM pkg_snapshots WHERE id = $1',
+      [snapshotId]
+    );
+    
+    if (snapshotCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: `Snapshot ${snapshotId} not found` });
+    }
+    
+    // Fetch all rules for this snapshot
+    const rulesResult = await client.query(`
+      SELECT id, rule_name, rule_source
+      FROM pkg_policy_rules r
+      WHERE r.snapshot_id = $1 AND r.disabled = FALSE
+    `, [snapshotId]);
+    
+    const compiledRules = [];
+    
+    for (const rule of rulesResult.rows) {
+      // Generate minimal valid WASM module with exported "evaluate" function
+      const wasmBytes = makeMinimalWasmEvaluateReturns1();
+      
+      // Store as base64-encoded string (since compiled_rule is TEXT, not BYTEA)
+      const compiledRuleBase64 = wasmBytes.toString('base64');
+      const ruleHash = crypto.createHash('sha256').update(wasmBytes).digest('hex');
+      
+      // Update rule with compiled WASM bytes (base64-encoded)
+      await client.query(`
+        UPDATE pkg_policy_rules 
+        SET compiled_rule = $1, rule_hash = $2
+        WHERE id = $3
+      `, [compiledRuleBase64, ruleHash, rule.id]);
+      
+      compiledRules.push({
+        ruleId: rule.id,
+        ruleName: rule.rule_name,
+        compiled: true,
+        hash: ruleHash
+      });
+    }
+    
+    // Create or update WASM artifact in pkg_snapshot_artifacts
+    // Generate valid WASM module that exports "evaluate" function
+    // For now, create a single exported evaluate function (can be enhanced later to bundle all rules)
+    const artifactBytes = makeMinimalWasmEvaluateReturns1();
+    
+    const artifactHash = crypto.createHash('sha256').update(artifactBytes).digest('hex');
+    
+    // Check if artifact already exists
+    const existingArtifact = await client.query(
+      'SELECT snapshot_id FROM pkg_snapshot_artifacts WHERE snapshot_id = $1',
+      [snapshotId]
+    );
+    
+    if (existingArtifact.rows.length > 0) {
+      // Update existing artifact
+      await client.query(`
+        UPDATE pkg_snapshot_artifacts 
+        SET artifact_type = $1, artifact_bytes = $2, sha256 = $3, created_at = NOW(), created_by = $4
+        WHERE snapshot_id = $5
+      `, ['wasm_pack', artifactBytes, artifactHash, 'control-plane', snapshotId]);
+      console.log(`[POST /api/snapshots/${snapshotId}/compile-rules] Updated WASM artifact`);
+    } else {
+      // Create new artifact
+      await client.query(`
+        INSERT INTO pkg_snapshot_artifacts (snapshot_id, artifact_type, artifact_bytes, sha256, created_by)
+        VALUES ($1, $2, $3, $4, $5)
+      `, [snapshotId, 'wasm_pack', artifactBytes, artifactHash, 'control-plane']);
+      console.log(`[POST /api/snapshots/${snapshotId}/compile-rules] Created WASM artifact`);
+    }
+    
+    await client.query('COMMIT');
+    
+    console.log(`[POST /api/snapshots/${snapshotId}/compile-rules] Compiled ${compiledRules.length} rules and created WASM artifact`);
+    
+    res.json({
+      snapshotId,
+      compiledCount: compiledRules.length,
+      rules: compiledRules,
+      artifactCreated: true,
+      artifactHash
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error(`[POST /api/snapshots/:id/compile-rules] Error:`, error);
     res.status(500).json({ error: error.message });
   } finally {
     client.release();

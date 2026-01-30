@@ -136,6 +136,12 @@ export interface UnifiedMemoryItem {
 
 export type DeploymentTarget =
   | 'router'
+  | 'HVAC_CONTROLLER'
+  | 'ELEVATOR_BANK_A'
+  | 'KIDS_ZONE_GATEWAY'
+  | 'JOURNEY_ZONE_GATEWAY'
+  | 'GIFT_ZONE_GATEWAY'
+  | 'WEAR_ZONE_GATEWAY'
   | 'edge:robot'
   | 'edge:camera'
   | 'edge:door'
@@ -180,6 +186,25 @@ export interface ValidationRun {
       params?: any;
     }>;
     logs?: string[];
+    // Digital Twin Critic integration
+    digitalTwinIssues?: Array<{
+      severity: 'critical' | 'warning' | 'info';
+      ruleId?: string;
+      ruleName?: string;
+      issue: string;
+      recommendation?: string;
+    }>;
+    hardwareConstraints?: {
+      printer?: {
+        maxInkPerLayer: number;
+        maxLayers: number;
+        supportedFabricTypes: string[];
+      };
+      painter?: {
+        maxColors: number;
+        precision: 'high' | 'medium' | 'low';
+      };
+    };
   };
 }
 

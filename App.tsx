@@ -5,7 +5,7 @@ import { Layout } from './components/Layout';
 import { Dashboard } from './pages/Dashboard';
 import { PolicyStudio } from './pages/PolicyStudio';
 import { InitializationPage } from './pages/InitializationPage';
-import { Simulator } from './pages/Simulator';
+import { Simulator } from './pages/SandboxSimulator';
 import { KnowledgeBase } from './pages/KnowledgeBase';
 import { ControlPlane } from './pages/ControlPlane';
 import { SeedData } from './pages/SeedData';

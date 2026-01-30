@@ -1,5 +1,6 @@
 import { EvolutionProposal, Rule, Snapshot, ValidationRun, Deployment, PkgEnv } from '../types';
 import { generateEvolutionPlan } from './geminiService';
+import { seedcoreService } from './seedcoreService';
 
 // --- Evolution Agent ---
 export const proposeEvolution = async (
@@ -131,6 +132,7 @@ async function sha256(message: string): Promise<string> {
 /**
  * Promote a native snapshot to WASM format
  * Simulates the compilation process: compression + checksum update
+ * Also compiles all rules to WASM format
  */
 export const promoteToWasm = async (
   snapshot: Snapshot,
@@ -154,6 +156,54 @@ export const promoteToWasm = async (
     sizeBytes: wasmSize,
     artifactFormat: 'wasm'
   });
+  
+  // Compile all rules for this snapshot to WASM format using SeedCore API
+  try {
+    const compileResult = await seedcoreService.compilePKGRules(snapshot.id, {
+      entrypoint: 'data.pkg.result'
+    });
+    console.log(`Compiled ${compileResult.compiled_count} rules for snapshot ${snapshot.id}`);
+    
+    // Safely extract hash/checksum from response (handle different field names)
+    const artifactHash = compileResult.artifact_hash || 
+                         compileResult.sha256 || 
+                         compileResult.checksum || 
+                         compileResult.bundle_sha256;
+    if (artifactHash) {
+      console.log(`Artifact hash: ${artifactHash.substring(0, 16)}...`);
+    }
+    
+    // Use compilation results for checksum/size if available (more accurate than simulated values)
+    const compilationChecksum = compileResult.checksum || 
+                                  compileResult.sha256 || 
+                                  compileResult.artifact_hash ||
+                                  compileResult.bundle_sha256;
+    
+    if (compilationChecksum && compileResult.size_bytes) {
+      // Update the promotion with actual compilation results
+      const finalChecksum = compilationChecksum;
+      const finalWasmSize = compileResult.size_bytes;
+      
+      // Re-promote with accurate values from compilation
+      const finalUpdated = await promoteSnapshot(snapshot.id, {
+        checksum: finalChecksum,
+        sizeBytes: finalWasmSize,
+        artifactFormat: 'wasm'
+      });
+      return finalUpdated;
+    }
+  } catch (compileError: any) {
+    console.warn('Error compiling rules during promotion:', compileError);
+    // Non-fatal: continue with promotion even if rule compilation fails
+    // But log specific error types for debugging
+    if (compileError.message?.includes('SNAPSHOT_NOT_FOUND')) {
+      console.error(`Snapshot ${snapshot.id} not found in SeedCore backend`);
+    } else if (compileError.message?.includes('COMPILATION_FAILED')) {
+      console.error('WASM compilation failed - check OPA installation');
+    } else if (compileError.message?.includes('SERVER_NOT_RUNNING')) {
+      console.error('SeedCore backend is not running - compilation skipped');
+    }
+  }
   
   return updated;
 };

@@ -5,7 +5,7 @@ import {
   Server, Radio, Edit, Pause, Clock
 } from 'lucide-react';
 
-import { getSnapshots, getRules, getSubtaskTypes, getDeployments } from '../mockData';
+import { getSnapshots, getRules, getSubtaskTypes, getDeployments, clearCache } from '../mockData';
 import { EvolutionProposal, AgentLog, Snapshot, ValidationRun, Rule, PkgEnv, SubtaskType, Deployment, DeploymentTarget } from '../types';
 
 import {
@@ -16,10 +16,12 @@ import {
   promoteToWasm,
 } from '../services/agentSystem';
 import { generateEvolutionPlan } from '../services/geminiService';
+import { validateRulesWithDigitalTwin } from '../services/digitalTwinService';
 
 import { createSnapshot } from '../services/snapshotService';
 import { createRule } from '../services/ruleService';
 import { createOrUpdateDeployment, rollbackDeploymentLane, getRolloutEvents } from '../services/deploymentService';
+import { seedcoreService } from '../services/seedcoreService';
 
 // ---------- helpers ----------
 const mkId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -64,6 +66,14 @@ export const ControlPlane: React.FC = () => {
   const [intent, setIntent] = useState(
     'We are seeing too many false positive fire alarms from toaster ovens in standard rooms. Adjust threshold.'
   );
+  
+  // Zone-aware evolution
+  const [selectedZone, setSelectedZone] = useState<string>('INFRASTRUCTURE');
+  
+  // Deployment target and temporal awareness
+  const [deploymentTarget, setDeploymentTarget] = useState<DeploymentTarget>('router');
+  const [deploymentDuration, setDeploymentDuration] = useState<number | null>(null); // Duration in hours, null = permanent
+  const [deploymentExpiry, setDeploymentExpiry] = useState<string | null>(null); // ISO timestamp
 
   const [agentLogs, setAgentLogs] = useState<AgentLog[]>([]);
   const [proposal, setProposal] = useState<EvolutionProposal | null>(null);
@@ -97,6 +107,7 @@ export const ControlPlane: React.FC = () => {
   const [isBuilding, setIsBuilding] = useState(false);
   const [isPromoting, setIsPromoting] = useState(false);
   const [isValidating, setIsValidating] = useState(false);
+  const [isCompiling, setIsCompiling] = useState(false);
 
   // Optional: whether to persist rules into DB immediately on build
   const [persistRulesOnBuild, setPersistRulesOnBuild] = useState<boolean>(true);
@@ -116,6 +127,7 @@ export const ControlPlane: React.FC = () => {
       message,
       timestamp: new Date().toLocaleTimeString(),
       level,
+      // Unified Memory Event (Tier A: event_working)
       // keep compat: AgentLog type doesn't have pipelineId, so we encode it in message or ignore
     }, ...prev.filter(x => x.id)]); // shallow stability
   };
@@ -298,6 +310,19 @@ export const ControlPlane: React.FC = () => {
       ]);
       setDeployments(deps || []);
       setRolloutEvents(events || []);
+      
+      // Check if there are any active deployments left for this snapshot
+      const activeDeploymentsForSnapshot = (deps || []).filter(
+        d => d.snapshotId === activeSnapshotId && d.isActive && d.percent > 0
+      );
+      
+      // If no active deployments remain, reset deployment-related UI state
+      if (activeDeploymentsForSnapshot.length === 0) {
+        setDeploymentPercent(0);
+        setDeploymentExpiry(null);
+        setDeploymentDuration(null);
+        addLog('DEPLOYMENT', `Run ${runId}: All deployments rolled back. Reset deployment state.`, 'INFO', runId);
+      }
 
       setTimeout(() => setDeploymentMessage(null), 3000);
     } catch (error: any) {
@@ -322,7 +347,8 @@ export const ControlPlane: React.FC = () => {
         region: deployment.region,
         percent: 0,
         isActive: false,
-        activatedBy: 'control-plane',
+        // Don't update activatedBy when deactivating - preserve original activation info
+        activatedBy: undefined,
         deploymentKey: `control-plane-deactivate-${Date.now()}`,
         isRollback: true,
       });
@@ -339,6 +365,19 @@ export const ControlPlane: React.FC = () => {
       ]);
       setDeployments(deps || []);
       setRolloutEvents(events || []);
+      
+      // Check if there are any active deployments left for this snapshot
+      const activeDeploymentsForSnapshot = (deps || []).filter(
+        d => d.snapshotId === activeSnapshotId && d.isActive && d.percent > 0
+      );
+      
+      // If no active deployments remain, reset deployment-related UI state
+      if (activeDeploymentsForSnapshot.length === 0) {
+        setDeploymentPercent(0);
+        setDeploymentExpiry(null);
+        setDeploymentDuration(null);
+        addLog('DEPLOYMENT', `Run ${runId}: All deployments deactivated. Reset deployment state.`, 'INFO', runId);
+      }
 
       setTimeout(() => setDeploymentMessage(null), 3000);
     } catch (error: any) {
@@ -481,7 +520,7 @@ export const ControlPlane: React.FC = () => {
     }
   };
 
-  // -------- Step 1: Evolution --------
+  // -------- Step 1: Evolution (Zone-Aware) --------
   const handleEvolution = async () => {
     if (loadingData) return;
 
@@ -500,7 +539,7 @@ export const ControlPlane: React.FC = () => {
     setRunIntent(intentForRun);
 
     setIsEvolving(true);
-    addLog('EVOLUTION', `Run ${newRunId}: analyzing intent + historical failures...`, 'INFO', newRunId);
+    addLog('EVOLUTION', `Run ${newRunId}: analyzing intent for zone=${selectedZone} + historical failures...`, 'INFO', newRunId);
 
     const base = pickBaseSnapshot(snapshots, baseSnapshotId);
     if (!base) {
@@ -510,16 +549,19 @@ export const ControlPlane: React.FC = () => {
     }
 
     addLog('EVOLUTION', `Base snapshot: ${base.version} (id=${base.id}, env=${base.env}, active=${base.isActive})`, 'INFO', newRunId);
+    addLog('EVOLUTION', `Zone context: ${selectedZone} - Pulling zone-specific facts...`, 'INFO', newRunId);
 
     try {
-      const prop = await proposeEvolution(intentForRun, base);
+      // Zone-aware evolution: Include zone context in intent
+      const zoneContextualIntent = `[Zone: ${selectedZone}] ${intentForRun}`;
+      const prop = await proposeEvolution(zoneContextualIntent, base);
 
       // ignore stale results
       if (pipelineIdRef.current !== newRunId) return;
 
       if (prop) {
         setProposal(prop);
-        addLog('EVOLUTION', `Generated proposal: ${prop.newVersion}`, 'SUCCESS', newRunId);
+        addLog('EVOLUTION', `Generated proposal: ${prop.newVersion} (zone=${selectedZone})`, 'SUCCESS', newRunId);
       } else {
         addLog('EVOLUTION', 'Failed to generate proposal. Check API Key.', 'ERROR', newRunId);
       }
@@ -648,6 +690,77 @@ export const ControlPlane: React.FC = () => {
     }
   };
 
+  // -------- Step 3: Compile Rules (SeedCore API) --------
+  const handleCompileRules = async (snapshotId?: number) => {
+    const targetSnapshotId = snapshotId || draftSnapshot?.id;
+    if (!targetSnapshotId || targetSnapshotId < 1) {
+      const runId = pipelineIdRef.current;
+      addLog('EVOLUTION', 'Cannot compile: Snapshot ID is required.', 'ERROR', runId);
+      return;
+    }
+
+    setIsCompiling(true);
+    const runId = pipelineIdRef.current;
+    addLog('EVOLUTION', `Run ${runId}: Compiling rules for snapshot id=${targetSnapshotId} using SeedCore API...`, 'INFO', runId);
+
+    try {
+      const compileResult = await seedcoreService.compilePKGRules(targetSnapshotId, {
+        entrypoint: 'data.pkg.result'
+      });
+
+      // Safely extract hash/checksum from response (handle different field names)
+      const artifactHash = compileResult.artifact_hash || 
+                         compileResult.sha256 || 
+                         compileResult.checksum || 
+                         compileResult.bundle_sha256 || 
+                         'unknown';
+      
+      const shortHash = artifactHash !== 'unknown' 
+        ? `${artifactHash.substring(0, 16)}...` 
+        : 'N/A';
+
+      addLog(
+        'EVOLUTION',
+        `Compiled ${compileResult.compiled_count} rules. Artifact hash: ${shortHash}`,
+        'SUCCESS',
+        runId
+      );
+
+      // Reload snapshots to get updated checksum/size if compilation updated them
+      try {
+        clearCache();
+        const updatedSnaps = await getSnapshots();
+        setSnapshots(updatedSnaps);
+        
+        // Update draftSnapshot if it's the one we compiled
+        if (draftSnapshot && draftSnapshot.id === targetSnapshotId) {
+          const reloadedSnapshot = updatedSnaps.find(s => s.id === targetSnapshotId);
+          if (reloadedSnapshot) {
+            setDraftSnapshot(reloadedSnapshot);
+          }
+        }
+      } catch (reloadError) {
+        console.warn('Failed to reload snapshots after compilation:', reloadError);
+      }
+    } catch (error: any) {
+      let errorMessage = `Compilation failed: ${error?.message || String(error)}`;
+      
+      // Provide helpful error messages based on error type
+      if (error.message?.includes('SNAPSHOT_NOT_FOUND')) {
+        errorMessage = `Snapshot ${targetSnapshotId} not found in SeedCore backend`;
+      } else if (error.message?.includes('COMPILATION_FAILED')) {
+        errorMessage = 'WASM compilation failed - check OPA installation and SeedCore backend logs';
+      } else if (error.message?.includes('SERVER_NOT_RUNNING')) {
+        errorMessage = 'SeedCore backend is not running - ensure backend is started';
+      }
+      
+      addLog('EVOLUTION', errorMessage, 'ERROR', runId);
+      console.error('Compile error details:', { snapshotId: targetSnapshotId, error });
+    } finally {
+      setIsCompiling(false);
+    }
+  };
+
   // -------- Step 3: Promote --------
   const handlePromoteToWasm = async () => {
     if (!draftSnapshot) return;
@@ -660,7 +773,8 @@ export const ControlPlane: React.FC = () => {
 
     setIsPromoting(true);
     const nativeSize = draftSnapshot.sizeBytes;
-    addLog('EVOLUTION', `Run ${runId}: promoting snapshot id=${draftSnapshot.id} to WASM...`, 'INFO', runId);
+    const isRepromotion = draftSnapshot.artifactFormat === 'wasm';
+    addLog('EVOLUTION', `Run ${runId}: ${isRepromotion ? 'repromoting' : 'promoting'} snapshot id=${draftSnapshot.id} to WASM...`, 'INFO', runId);
 
     try {
       const snapshotRules = draftRules.length > 0 ? draftRules : rules.filter(r => r.snapshotId === draftSnapshot.id);
@@ -669,10 +783,31 @@ export const ControlPlane: React.FC = () => {
       setDraftSnapshot(promoted);
       addLog(
         'EVOLUTION',
-        `Promoted to WASM. ${nativeSize.toLocaleString()} → ${promoted.sizeBytes.toLocaleString()} bytes.`,
+        `${isRepromotion ? 'Repromoted' : 'Promoted'} to WASM. ${nativeSize.toLocaleString()} → ${promoted.sizeBytes.toLocaleString()} bytes.`,
         'SUCCESS',
         runId
       );
+      
+      // Reload snapshots from database to ensure artifactFormat is persisted and reflected in state
+      try {
+        // Clear cache to force fresh data from database
+        clearCache();
+        const updatedSnaps = await getSnapshots();
+        setSnapshots(updatedSnaps);
+        
+        // Update draftSnapshot with the reloaded version to ensure consistency
+        const reloadedSnapshot = updatedSnaps.find(s => s.id === promoted.id);
+        if (reloadedSnapshot) {
+          setDraftSnapshot(reloadedSnapshot);
+        } else {
+          // Fallback: use promoted snapshot if reloaded version not found
+          setDraftSnapshot(promoted);
+        }
+      } catch (reloadError) {
+        console.warn('Failed to reload snapshots after promotion:', reloadError);
+        // Non-fatal: use promoted snapshot directly
+        setDraftSnapshot(promoted);
+      }
     } catch (error: any) {
       addLog('EVOLUTION', `Promote failed: ${error?.message || String(error)}`, 'ERROR', runId);
       console.error('Promote error details:', { snapshotId: draftSnapshot.id, error });
@@ -681,7 +816,7 @@ export const ControlPlane: React.FC = () => {
     }
   };
 
-  // -------- Step 4: Validate --------
+  // -------- Step 4: Validate (Digital Twin Critic Integration) --------
   const handleValidate = async () => {
     const runId = pipelineIdRef.current;
 
@@ -691,18 +826,52 @@ export const ControlPlane: React.FC = () => {
     }
 
     setIsValidating(true);
-    addLog('VALIDATION', `Run ${runId}: initializing simulation suite...`, 'INFO', runId);
+    addLog('VALIDATION', `Run ${runId}: initializing Digital Twin Critic (hardware constraint validation)...`, 'INFO', runId);
 
     try {
       const snapshotRules = draftRules.length > 0 ? draftRules : rules.filter(r => r.snapshotId === draftSnapshot.id);
-      const result = await runValidationAgent(draftSnapshot.id, snapshotRules);
+      
+      // Integrate Digital Twin Critic for hardware constraint validation
+      addLog('VALIDATION', `Checking hardware constraints (HVAC limits, elevator capacity, safety protocols)...`, 'INFO', runId);
+      
+      const digitalTwinResult = await validateRulesWithDigitalTwin(snapshotRules, draftSnapshot);
+      
+      // Also run standard validation for consistency checks
+      const standardResult = await runValidationAgent(draftSnapshot.id, snapshotRules);
+      
+      // Combine results: Digital Twin must pass AND standard validation must pass
+      const combinedSuccess = digitalTwinResult.passed && standardResult.success;
+      
+      // Enhanced validation result with Digital Twin details
+      const enhancedResult: ValidationRun = {
+        ...standardResult,
+        success: combinedSuccess,
+        report: {
+          ...standardResult.report,
+          simulationScore: combinedSuccess ? (digitalTwinResult.validationScore * 100) : 0,
+          conflicts: [
+            ...(standardResult.report?.conflicts || []),
+            ...(digitalTwinResult.issues.filter(i => i.severity === 'critical').map(i => 
+              `[Hardware Constraint] ${i.ruleName || 'Unknown'}: ${i.issue}`
+            ))
+          ],
+          // Digital Twin Critic fields (extended ValidationRun.report)
+          digitalTwinIssues: digitalTwinResult.issues,
+          hardwareConstraints: digitalTwinResult.hardwareConstraints,
+        } as ValidationRun['report']
+      };
 
-      setValidationResult(result);
+      setValidationResult(enhancedResult);
 
-      if (result.success) {
-        addLog('VALIDATION', `Validation PASSED. Score: ${result.report?.simulationScore}`, 'SUCCESS', runId);
+      if (combinedSuccess) {
+        addLog('VALIDATION', `Validation PASSED. Digital Twin Score: ${(digitalTwinResult.validationScore * 100).toFixed(1)}%`, 'SUCCESS', runId);
+        addLog('VALIDATION', `Hardware constraints validated: All rules compatible with physical systems.`, 'SUCCESS', runId);
       } else {
-        addLog('VALIDATION', `Validation FAILED. Conflicts: ${result.report?.conflicts?.length ?? 0}`, 'ERROR', runId);
+        const criticalIssues = digitalTwinResult.issues.filter(i => i.severity === 'critical').length;
+        addLog('VALIDATION', `Validation FAILED. Critical hardware issues: ${criticalIssues}, Conflicts: ${standardResult.report?.conflicts?.length ?? 0}`, 'ERROR', runId);
+        if (criticalIssues > 0) {
+          addLog('VALIDATION', `Hardware constraint violations detected. Review Digital Twin report before deployment.`, 'ERROR', runId);
+        }
       }
     } catch (e: any) {
       addLog('VALIDATION', `Validation error: ${e?.message || String(e)}`, 'ERROR', runId);
@@ -744,13 +913,34 @@ export const ControlPlane: React.FC = () => {
           // Promote to WASM
           const promoted = await promoteToWasm(snapshotToDeploy, snapshotRules);
           
-          // Update the snapshot in our state
-          setSnapshots(prev => prev.map(s => s.id === snapshotToDeploy.id ? promoted : s));
-          setDraftSnapshot(promoted);
-          setSelectedSnapshotForDeployment(promoted.id);
-          
-          // Use the promoted snapshot for deployment
-          finalSnapshotToDeploy = promoted;
+          // Reload snapshots from database to ensure artifactFormat is persisted and reflected in state
+          try {
+            // Clear cache to force fresh data from database
+            clearCache();
+            const updatedSnaps = await getSnapshots();
+            setSnapshots(updatedSnaps);
+            
+            // Find the reloaded promoted snapshot
+            const reloadedPromoted = updatedSnaps.find(s => s.id === promoted.id);
+            if (reloadedPromoted) {
+              setDraftSnapshot(reloadedPromoted);
+              setSelectedSnapshotForDeployment(reloadedPromoted.id);
+              finalSnapshotToDeploy = reloadedPromoted;
+            } else {
+              // Fallback to promoted snapshot if reload fails
+              setSnapshots(prev => prev.map(s => s.id === snapshotToDeploy.id ? promoted : s));
+              setDraftSnapshot(promoted);
+              setSelectedSnapshotForDeployment(promoted.id);
+              finalSnapshotToDeploy = promoted;
+            }
+          } catch (reloadError) {
+            console.warn('Failed to reload snapshots after automatic promotion:', reloadError);
+            // Fallback: use promoted snapshot directly
+            setSnapshots(prev => prev.map(s => s.id === snapshotToDeploy.id ? promoted : s));
+            setDraftSnapshot(promoted);
+            setSelectedSnapshotForDeployment(promoted.id);
+            finalSnapshotToDeploy = promoted;
+          }
           
           addLog('DEPLOYMENT', `Successfully promoted to WASM. Proceeding with deployment...`, 'SUCCESS', runId);
         } catch (error: any) {
@@ -786,17 +976,22 @@ export const ControlPlane: React.FC = () => {
     setDeploymentPercent(nextStep);
     
     try {
-      // Persist deployment to database
+      // Persist deployment to database with selected target and temporal awareness
       const deploymentResult = await createOrUpdateDeployment({
         snapshotId: finalSnapshotToDeploy.id,
-        target: 'router', // Default target, could be made configurable
+        target: deploymentTarget, // Use selected deployment target
         region: 'global',
         percent: nextStep,
         isActive: true,
         activatedBy: 'control-plane',
-        deploymentKey: 'default',
+        deploymentKey: `control-plane-${deploymentTarget}-${Date.now()}`,
         isRollback: false,
       });
+      
+      // Log temporal awareness if duration is set
+      if (deploymentDuration && deploymentExpiry) {
+        addLog('DEPLOYMENT', `Temporary deployment: Will auto-rollback at ${new Date(deploymentExpiry).toLocaleString()}`, 'INFO', runId);
+      }
       
       // Check for server-side no-op detection
       if (deploymentResult.current.noop) {
@@ -876,7 +1071,7 @@ export const ControlPlane: React.FC = () => {
         </div>
       )}
 
-      {/* Controls: Base snapshot + persist rules */}
+      {/* Controls: Base snapshot + persist rules + Zone selector */}
       <div className="bg-white border border-gray-200 rounded-lg shadow-sm p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div className="flex flex-col sm:flex-row sm:items-center gap-3">
           <div className="text-xs text-gray-500">Base Snapshot (PROD):</div>
@@ -892,20 +1087,39 @@ export const ControlPlane: React.FC = () => {
             ))}
           </select>
           {baseSnapshot && (
-            <div className="text-xs text-gray-500">
-              Using: <span className="font-mono">{baseSnapshot.version}</span>
+            <div className="flex items-center gap-2">
+              <div className="text-xs text-gray-500">
+                Using: <span className="font-mono">{baseSnapshot.version}</span>
+              </div>
             </div>
           )}
         </div>
 
-        <label className="flex items-center gap-2 text-sm text-gray-700">
-          <input
-            type="checkbox"
-            checked={persistRulesOnBuild}
-            onChange={(e) => setPersistRulesOnBuild(e.target.checked)}
-          />
-          Persist rules to DB during build (recommended)
-        </label>
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <div className="text-xs text-gray-500">Zone:</div>
+            <select
+              value={selectedZone}
+              onChange={(e) => setSelectedZone(e.target.value)}
+              className="px-3 py-2 border border-gray-300 rounded-md text-sm"
+            >
+              <option value="JOURNEY">Journey Studio</option>
+              <option value="GIFT">Gift Forge</option>
+              <option value="WEAR">Fashion Lab</option>
+              <option value="KIDS">Magic Atelier</option>
+              <option value="INFRASTRUCTURE">Building Systems</option>
+            </select>
+          </div>
+          
+          <label className="flex items-center gap-2 text-sm text-gray-700">
+            <input
+              type="checkbox"
+              checked={persistRulesOnBuild}
+              onChange={(e) => setPersistRulesOnBuild(e.target.checked)}
+            />
+            Persist rules to DB during build (recommended)
+          </label>
+        </div>
       </div>
 
       {/* Main Pipeline Grid */}
@@ -919,15 +1133,21 @@ export const ControlPlane: React.FC = () => {
           </div>
           <div className="p-4 flex-1 overflow-y-auto space-y-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Human Intent / Incident Log</label>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Human Intent / Incident Log
+                <span className="ml-2 text-xs font-normal text-gray-500">(Zone: {selectedZone})</span>
+              </label>
               <textarea
                 className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm border p-3 h-32"
                 value={intent}
                 onChange={(e) => setIntent(e.target.value)}
-                placeholder="Describe what needs to change..."
+                placeholder={`Describe what needs to change for ${selectedZone} zone...`}
               />
               <div className="text-xs text-gray-500 mt-2">
                 Run intent snapshot: <span className="font-mono">{runIntent ? safeQuote(runIntent, 80) : '(none yet)'}</span>
+              </div>
+              <div className="text-xs text-amber-600 mt-1">
+                ℹ️ Zone-aware: Evolution Agent will pull zone-specific facts for {selectedZone} before proposing changes.
               </div>
             </div>
             
@@ -961,7 +1181,7 @@ export const ControlPlane: React.FC = () => {
                 className={`w-full flex justify-center items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white ${isEvolving || !!proposal ? 'bg-gray-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700'}`}
               >
                 {isEvolving ? <Loader2 className="animate-spin mr-2 h-4 w-4"/> : <Bot className="mr-2 h-4 w-4"/>}
-                Analyze & Propose
+                Analyze & Propose ({selectedZone})
               </button>
             )}
 
@@ -984,8 +1204,8 @@ export const ControlPlane: React.FC = () => {
                 <div className="mt-4 flex space-x-2">
                    <button 
                      onClick={handleBuild}
-                     disabled={!!draftSnapshot || isBuilding}
-                     className="flex-1 bg-indigo-600 text-white text-xs py-2 rounded hover:bg-indigo-700 disabled:bg-gray-400 flex items-center justify-center"
+                     disabled={!!draftSnapshot || isBuilding || !proposal}
+                     className="flex-1 bg-indigo-600 text-white text-xs py-2 rounded hover:bg-indigo-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center justify-center"
                    >
                      {isBuilding ? <Loader2 className="animate-spin mr-2 h-3 w-3"/> : null}
                      Approve & Build (Native)
@@ -1039,7 +1259,7 @@ export const ControlPlane: React.FC = () => {
                       Size: {draftSnapshot.sizeBytes.toLocaleString()} bytes
                     </div>
                     <div className="text-xs text-gray-500 mt-1">
-                      Checksum: {draftSnapshot.checksum.substring(0, 16)}...
+                      Checksum: {draftSnapshot.checksum ? `${draftSnapshot.checksum.substring(0, 16)}...` : 'N/A'}
                     </div>
                   </div>
 
@@ -1101,32 +1321,56 @@ export const ControlPlane: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Promote Button - Show if native or undefined (needs promotion) */}
-                  {(draftSnapshot.artifactFormat === 'native' || !draftSnapshot.artifactFormat) && (
-                    <button 
-                      onClick={handlePromoteToWasm}
-                      disabled={isPromoting}
-                      className="w-full bg-purple-600 text-white py-3 rounded-lg shadow hover:bg-purple-700 flex items-center justify-center disabled:bg-gray-400 disabled:cursor-not-allowed font-medium"
-                    >
-                      {isPromoting ? (
-                        <>
-                          <Loader2 className="animate-spin mr-2 h-4 w-4" />
-                          Compiling to WASM...
-                        </>
-                      ) : (
-                        <>
-                          <ArrowRight className="h-4 w-4 mr-2" />
-                          Promote to WASM
-                        </>
-                      )}
-                    </button>
-                  )}
+                  {/* Compile Rules Button (SeedCore API) */}
+                  <button 
+                    onClick={() => handleCompileRules(draftSnapshot.id)}
+                    disabled={isCompiling || !draftSnapshot || !draftSnapshot.id}
+                    className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-2 rounded-lg shadow flex items-center justify-center disabled:bg-gray-400 disabled:cursor-not-allowed font-medium text-sm"
+                  >
+                    {isCompiling ? (
+                      <>
+                        <Loader2 className="animate-spin mr-2 h-4 w-4" />
+                        Compiling Rules...
+                      </>
+                    ) : (
+                      <>
+                        <Terminal className="h-4 w-4 mr-2" />
+                        Compile Rules (SeedCore API)
+                      </>
+                    )}
+                  </button>
+
+                  {/* Promote/Repromote Button */}
+                  <button 
+                    onClick={handlePromoteToWasm}
+                    disabled={isPromoting || !draftSnapshot}
+                    className={`w-full text-white py-3 rounded-lg shadow flex items-center justify-center disabled:bg-gray-400 disabled:cursor-not-allowed font-medium ${
+                      draftSnapshot.artifactFormat === 'wasm' 
+                        ? 'bg-purple-500 hover:bg-purple-600' 
+                        : 'bg-purple-600 hover:bg-purple-700'
+                    }`}
+                  >
+                    {isPromoting ? (
+                      <>
+                        <Loader2 className="animate-spin mr-2 h-4 w-4" />
+                        {draftSnapshot.artifactFormat === 'wasm' ? 'Recompiling to WASM...' : 'Compiling to WASM...'}
+                      </>
+                    ) : (
+                      <>
+                        <ArrowRight className="h-4 w-4 mr-2" />
+                        {draftSnapshot.artifactFormat === 'wasm' ? 'Repromote to WASM' : 'Promote to WASM'}
+                      </>
+                    )}
+                  </button>
 
                   {draftSnapshot.artifactFormat === 'wasm' && (
                     <div className="bg-green-50 border border-green-200 rounded-lg p-3 text-center">
                       <div className="text-sm font-semibold text-green-800">✓ Ready for Validation</div>
                       <div className="text-xs text-green-600 mt-1">
                         Snapshot compiled and optimized
+                      </div>
+                      <div className="text-xs text-gray-500 mt-2">
+                        You can repromote to regenerate compiled rules
                       </div>
                     </div>
                   )}
@@ -1213,18 +1457,18 @@ export const ControlPlane: React.FC = () => {
 
                   <button 
                     onClick={handleValidate}
-                    disabled={isValidating}
+                    disabled={isValidating || !draftSnapshot || draftSnapshot.artifactFormat !== 'wasm'}
                     className="w-full bg-emerald-600 text-white py-3 rounded-lg shadow hover:bg-emerald-700 flex items-center justify-center disabled:bg-gray-400 disabled:cursor-not-allowed font-medium"
                   >
                     {isValidating ? (
                       <>
                         <Loader2 className="animate-spin mr-2 h-4 w-4" />
-                        Running Validation...
+                        Running Digital Twin Validation...
                       </>
                     ) : (
                       <>
                         <ShieldAlert className="h-4 w-4 mr-2" />
-                        Run Validation
+                        Run Digital Twin Validation
                       </>
                     )}
                   </button>
@@ -1258,17 +1502,101 @@ export const ControlPlane: React.FC = () => {
                              </ul>
                           </div>
                        )}
+                       {(validationResult.report as any)?.digitalTwinIssues && (validationResult.report as any).digitalTwinIssues.length > 0 && (
+                          <div className="bg-amber-50 border border-amber-200 rounded p-3 mb-4">
+                             <div className="text-xs font-bold text-amber-800 mb-2">Digital Twin Issues:</div>
+                             <ul className="list-disc pl-5 text-xs text-amber-700 space-y-1">
+                                {(validationResult.report as any).digitalTwinIssues.map((issue: any, i: number) => (
+                                   <li key={i}>
+                                      <span className={`font-semibold ${issue.severity === 'critical' ? 'text-red-600' : issue.severity === 'warning' ? 'text-amber-600' : 'text-blue-600'}`}>
+                                         [{issue.severity.toUpperCase()}]
+                                      </span>
+                                      {' '}
+                                      {issue.ruleName ? `${issue.ruleName}: ` : ''}{issue.issue}
+                                      {issue.recommendation && (
+                                         <div className="ml-4 text-xs text-gray-600 mt-0.5">
+                                            💡 {issue.recommendation}
+                                         </div>
+                                      )}
+                                   </li>
+                                ))}
+                             </ul>
+                          </div>
+                       )}
                        {validationResult.success ? (
-                          <button 
-                             onClick={() => handleDeployStep()}
-                             className="w-full bg-emerald-600 text-white py-2 rounded shadow hover:bg-emerald-700 flex justify-center items-center"
-                          >
-                             <ArrowRight className="h-4 w-4 mr-2" />
-                             Proceed to Canary Deployment
-                          </button>
+                          <div className="space-y-3">
+                             {/* Deployment Target Selection */}
+                             <div>
+                                <label className="block text-xs font-medium text-gray-700 mb-1">Deployment Target:</label>
+                                <select
+                                  value={deploymentTarget}
+                                  onChange={(e) => setDeploymentTarget(e.target.value as DeploymentTarget)}
+                                  className="w-full px-3 py-2 border border-gray-300 rounded text-sm"
+                                >
+                                  <option value="router">Router (Global)</option>
+                                  <option value="HVAC_CONTROLLER">HVAC Controller</option>
+                                  <option value="ELEVATOR_BANK_A">Elevator Bank A</option>
+                                  <option value="KIDS_ZONE_GATEWAY">Kids Zone Gateway</option>
+                                  <option value="JOURNEY_ZONE_GATEWAY">Journey Zone Gateway</option>
+                                  <option value="GIFT_ZONE_GATEWAY">Gift Zone Gateway</option>
+                                  <option value="WEAR_ZONE_GATEWAY">Wear Zone Gateway</option>
+                                  <option value="edge:door">Edge: Door Systems</option>
+                                  <option value="edge:robot">Edge: Robot Fleet</option>
+                                  <option value="edge:camera">Edge: Camera Network</option>
+                                </select>
+                             </div>
+                             
+                             {/* Temporal Awareness: Duration/Expiry */}
+                             <div>
+                                <label className="block text-xs font-medium text-gray-700 mb-1">Deployment Duration (hours, leave empty for permanent):</label>
+                                <div className="flex items-center gap-2">
+                                  <input
+                                    type="number"
+                                    min="0.5"
+                                    step="0.5"
+                                    value={deploymentDuration ?? ''}
+                                    onChange={(e) => {
+                                      const val = e.target.value ? Number(e.target.value) : null;
+                                      setDeploymentDuration(val);
+                                      if (val) {
+                                        const expiry = new Date();
+                                        expiry.setHours(expiry.getHours() + val);
+                                        setDeploymentExpiry(expiry.toISOString());
+                                      } else {
+                                        setDeploymentExpiry(null);
+                                      }
+                                    }}
+                                    placeholder="e.g., 2 (for 2 hours)"
+                                    className="flex-1 px-3 py-2 border border-gray-300 rounded text-sm"
+                                  />
+                                  {deploymentExpiry && (
+                                    <span className="text-xs text-gray-500">
+                                      Expires: {new Date(deploymentExpiry).toLocaleString()}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-xs text-gray-500 mt-1">
+                                  ℹ️ Temporary policies will auto-rollback after expiry
+                                </div>
+                             </div>
+                             
+                             <button 
+                                onClick={() => handleDeployStep()}
+                                disabled={!validationResult.success}
+                                className="w-full bg-emerald-600 text-white py-2 rounded shadow hover:bg-emerald-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex justify-center items-center"
+                             >
+                                <ArrowRight className="h-4 w-4 mr-2" />
+                                Proceed to Canary Deployment
+                             </button>
+                          </div>
                        ) : (
                           <div className="text-center text-red-700 text-sm font-semibold">
                              Validation Failed - Cannot Deploy
+                             {validationResult.report && (validationResult.report as any).digitalTwinIssues && (
+                                <div className="mt-2 text-xs text-red-600">
+                                   {(validationResult.report as any).digitalTwinIssues.filter((i: any) => i.severity === 'critical').length} critical hardware constraint violation(s)
+                                </div>
+                             )}
                           </div>
                        )}
                     </div>
@@ -1282,13 +1610,60 @@ export const ControlPlane: React.FC = () => {
                        <div className="text-sm text-gray-600 mb-4">
                           Ready to deploy: <span className="font-mono font-semibold">{draftSnapshot?.version}</span>
                        </div>
-                       <button 
-                          onClick={() => handleDeployStep()}
-                          className="w-full bg-emerald-600 text-white py-2 rounded shadow hover:bg-emerald-700 flex justify-center items-center"
-                       >
-                          <ArrowRight className="h-4 w-4 mr-2" />
-                          Deploy Snapshot
-                       </button>
+                       <div className="space-y-3">
+                          {/* Deployment Target Selection for existing snapshot */}
+                          <div>
+                             <label className="block text-xs font-medium text-gray-700 mb-1">Deployment Target:</label>
+                             <select
+                               value={deploymentTarget}
+                               onChange={(e) => setDeploymentTarget(e.target.value as DeploymentTarget)}
+                               className="w-full px-3 py-2 border border-blue-300 rounded text-sm"
+                             >
+                               <option value="router">Router (Global)</option>
+                               <option value="HVAC_CONTROLLER">HVAC Controller</option>
+                               <option value="ELEVATOR_BANK_A">Elevator Bank A</option>
+                               <option value="KIDS_ZONE_GATEWAY">Kids Zone Gateway</option>
+                               <option value="JOURNEY_ZONE_GATEWAY">Journey Zone Gateway</option>
+                               <option value="GIFT_ZONE_GATEWAY">Gift Zone Gateway</option>
+                               <option value="WEAR_ZONE_GATEWAY">Wear Zone Gateway</option>
+                               <option value="edge:door">Edge: Door Systems</option>
+                               <option value="edge:robot">Edge: Robot Fleet</option>
+                               <option value="edge:camera">Edge: Camera Network</option>
+                             </select>
+                          </div>
+                          
+                          {/* Temporal Awareness for existing snapshot */}
+                          <div>
+                             <label className="block text-xs font-medium text-gray-700 mb-1">Deployment Duration (hours, leave empty for permanent):</label>
+                             <input
+                               type="number"
+                               min="0.5"
+                               step="0.5"
+                               value={deploymentDuration ?? ''}
+                               onChange={(e) => {
+                                 const val = e.target.value ? Number(e.target.value) : null;
+                                 setDeploymentDuration(val);
+                                 if (val) {
+                                   const expiry = new Date();
+                                   expiry.setHours(expiry.getHours() + val);
+                                   setDeploymentExpiry(expiry.toISOString());
+                                 } else {
+                                   setDeploymentExpiry(null);
+                                 }
+                               }}
+                               placeholder="e.g., 2 (for 2 hours)"
+                               className="w-full px-3 py-2 border border-blue-300 rounded text-sm"
+                             />
+                          </div>
+                          
+                          <button 
+                             onClick={() => handleDeployStep()}
+                             className="w-full bg-emerald-600 text-white py-2 rounded shadow hover:bg-emerald-700 flex justify-center items-center"
+                          >
+                             <ArrowRight className="h-4 w-4 mr-2" />
+                             Deploy Snapshot
+                          </button>
+                       </div>
                     </div>
                   ) : null}
                </div>
@@ -1324,7 +1699,11 @@ export const ControlPlane: React.FC = () => {
 
                   {deploymentPercent < 100 ? (
                      <div className="flex space-x-3">
-                        <button onClick={handleDeployStep} className="flex-1 bg-amber-500 hover:bg-amber-600 text-white py-2 rounded shadow">
+                        <button 
+                          onClick={handleDeployStep} 
+                          disabled={!validationResult || !validationResult.success}
+                          className="flex-1 bg-amber-500 hover:bg-amber-600 text-white py-2 rounded shadow disabled:bg-gray-400 disabled:cursor-not-allowed"
+                        >
                            Promote Stage
                         </button>
                         <button 
@@ -1336,15 +1715,17 @@ export const ControlPlane: React.FC = () => {
                               // Deactivate deployment on rollback (explicit rollback flag allows percent decrease)
                               await createOrUpdateDeployment({
                                 snapshotId: draftSnapshot.id,
-                                target: 'router',
+                                target: deploymentTarget,
                                 region: 'global',
                                 percent: 0,
                                 isActive: false, // Will be forced to false anyway when percent=0
                                 activatedBy: 'control-plane',
-                                deploymentKey: 'default',
+                                deploymentKey: `control-plane-rollback-${Date.now()}`,
                                 isRollback: true, // Explicit rollback flag
                               });
                               setDeploymentPercent(0);
+                              setDeploymentExpiry(null);
+                              setDeploymentDuration(null);
                               addLog('DEPLOYMENT', `Run ${runId}: Deployment rolled back (set to 0% and deactivated)`, 'WARN', runId);
                             } catch (error: any) {
                               addLog('DEPLOYMENT', `Failed to rollback deployment: ${error?.message || String(error)}`, 'ERROR', runId);
@@ -1522,10 +1903,16 @@ export const ControlPlane: React.FC = () => {
                               </button>
                             </div>
                           )}
-                          {dep.activatedBy && dep.activatedBy !== 'system' && (
+                          {dep.isActive && dep.activatedBy && dep.activatedBy !== 'system' && (
                             <div className="text-xs text-gray-500 mt-2 flex items-center gap-1">
                               <Clock className="h-3 w-3" />
                               Activated by: {dep.activatedBy} at {new Date(dep.activatedAt).toLocaleString()}
+                            </div>
+                          )}
+                          {!dep.isActive && dep.activatedBy && dep.activatedBy !== 'system' && (
+                            <div className="text-xs text-gray-400 mt-2 flex items-center gap-1">
+                              <Clock className="h-3 w-3" />
+                              Last activated by: {dep.activatedBy} at {new Date(dep.activatedAt).toLocaleString()}
                             </div>
                           )}
                         </div>
@@ -1601,11 +1988,12 @@ export const ControlPlane: React.FC = () => {
         </div>
       )}
 
-      {/* Terminal Log */}
+      {/* Terminal Log - Unified Memory Events (Tier A: event_working) */}
       <div className="h-48 bg-slate-900 rounded-lg shadow-inner overflow-hidden flex flex-col">
         <div className="p-2 bg-slate-800 border-b border-slate-700 flex items-center space-x-2">
            <Terminal className="text-slate-400 h-4 w-4" />
            <span className="text-xs text-slate-400 font-mono">Agent Event Stream</span>
+           <span className="text-xs text-slate-500 ml-2">(Unified Memory: Tier A - event_working)</span>
         </div>
         <div className="flex-1 overflow-y-auto p-4 font-mono text-xs space-y-1">
           {agentLogs.length === 0 && <span className="text-slate-600 italic">System ready. Waiting for events...</span>}

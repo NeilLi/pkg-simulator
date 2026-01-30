@@ -29,10 +29,13 @@ export const InitializationPage: React.FC = () => {
       if (result.success) {
         const envLabel = selectedEnv === PkgEnv.PROD ? 'production' : 
                         selectedEnv === PkgEnv.STAGING ? 'staging' : 'development';
+        const governedFactsInfo = result.created.governedFacts 
+          ? ` (${result.created.governedFacts} linked to rules)` 
+          : '';
         setInitMessage(
           `✅ Initialization successful for ${envLabel} environment! Created: ${result.created.snapshots} snapshot(s), ` +
           `${result.created.subtaskTypes} subtask type(s), ${result.created.rules} rule(s), ` +
-          `${result.created.facts} fact(s)`
+          `${result.created.facts} fact(s)${governedFactsInfo}`
         );
         // Clear cache after successful initialization
         clearCache();
@@ -143,7 +146,7 @@ export const InitializationPage: React.FC = () => {
           </li>
           <li className="flex items-start">
             <span className="text-green-500 mr-2">✓</span>
-            <span><strong>Temporal Facts:</strong> Plug-in unit registrations (robots, printers, IoT devices, staff, city services)</span>
+            <span><strong>Temporal Facts:</strong> Plug-in unit registrations (zones, systems, building maps) with proper temporal validity (valid_from, valid_to), system access grants, persona preferences, and PKG governance fields (pkg_rule_id, pkg_provenance, validation_status) - all facts are active immediately and ready for rule matching</span>
           </li>
           <li className="flex items-start">
             <span className="text-gray-400 mr-2">○</span>

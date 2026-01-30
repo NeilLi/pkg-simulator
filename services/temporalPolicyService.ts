@@ -95,12 +95,26 @@ export const TEMPORAL_FIXTURES: TemporalFixture[] = [
 
 /**
  * Filter facts by temporal validity at a given time
+ * 
+ * SeedCore Master Class: Governed facts (with pkg_rule_id) must have valid_from set
+ * to be active. This ensures governed facts are properly tracked by the PKG engine.
+ * 
+ * Consistent with InitializationPage.tsx governance pattern:
+ * - Governed facts (pkg_rule_id != null) should have valid_from set (defaults to now())
+ * - Governed facts are active if valid_from <= currentTime AND (valid_to IS NULL OR valid_to > currentTime)
  */
 export function getActiveFactsAtTime(facts: Fact[], currentTime: string): Fact[] {
   const now = new Date(currentTime);
 
   return facts.filter((fact) => {
-    // If fact has no temporal window, it's always active
+    // Governed facts (with pkg_rule_id) must have valid_from set to be active
+    // This ensures consistency with InitializationPage governance pattern
+    if (fact.pkgRuleId && !fact.validFrom) {
+      // Governed fact without valid_from is not active (should have been set during creation)
+      return false;
+    }
+
+    // If fact has no temporal window, it's always active (ungoverned facts)
     if (!fact.validFrom && !fact.validTo) {
       return true;
     }
@@ -309,9 +323,14 @@ export async function testRuleWithTemporalFixtures(
   for (const fixture of fixtures) {
     // Convert fixture facts to Fact format
     // Support namespace-aware fixtures (e.g., gym:checkout_time vs hotel:checkout_time)
+    // Ensure governed facts have proper temporal validity (consistent with InitializationPage)
     const facts: Fact[] = fixture.facts.map((f) => {
       // Generate text representation from structured triple (required in new schema)
       const factText = `${f.subject} ${f.predicate} ${JSON.stringify(f.object || {})}`;
+      
+      // For governed facts in fixtures, ensure valid_from is set
+      // If not provided, default to fixture currentTime for active facts
+      const validFrom = f.validFrom || (f.namespace ? fixture.currentTime : undefined);
       
       return {
         id: `fixture-${fixture.name}-${f.subject}`,
@@ -321,9 +340,11 @@ export async function testRuleWithTemporalFixtures(
         subject: f.subject,
         predicate: f.predicate,
         object: f.object,
-        validFrom: f.validFrom,
+        validFrom, // Ensure governed facts have valid_from set
         validTo: f.validTo,
         status: "active" as const,
+        // Note: Fixture facts are typically ungoverned (no pkg_rule_id)
+        // Governed facts would be created through PolicyStudio or InitializationPage
       };
     });
 

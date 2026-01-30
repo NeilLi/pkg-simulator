@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { seedDataService, SeedResult } from "./services/seedDataService";
+import { seedDataService, SeedResult } from "../services/seedDataService";
 
 const DEFAULT_DB_PROXY = "http://localhost:3011";
 

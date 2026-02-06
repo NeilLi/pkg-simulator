@@ -1,6 +1,8 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { Snapshot, Rule, Fact, SubtaskType, EvolutionProposal } from "../types";
 
+const LLM_MODEL = process.env.LLM_MODEL || "gemini-3-flash-preview";
+
 export interface GenerateRuleParams {
   prompt: string;
   snapshotId: number;
@@ -132,7 +134,7 @@ export const generateRuleFromNaturalLanguage = async (params: GenerateRuleParams
     const fullPrompt = `${params.prompt}${context}\n\nGenerate a rule object in JSON format:`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
+      model: LLM_MODEL,
       contents: fullPrompt,
       config: {
         systemInstruction: systemInstruction,
@@ -272,7 +274,7 @@ export const generateFactFromNaturalLanguage = async (params: GenerateFactParams
     const fullPrompt = `${params.prompt}${context}\n\nGenerate a fact object in JSON format:`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
+      model: LLM_MODEL,
       contents: fullPrompt,
       config: {
         systemInstruction: systemInstruction,
@@ -347,7 +349,7 @@ export const generateEvolutionPlan = async (
     `;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3-flash-preview',
+      model: LLM_MODEL,
       contents: userPrompt,
       config: {
         systemInstruction: systemInstruction,

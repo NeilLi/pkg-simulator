@@ -17,6 +17,8 @@
 import { GoogleGenAI } from "@google/genai";
 import { DesignContext, DesignAnalysis } from "./designGovernanceService";
 
+const LLM_MODEL = process.env.LLM_MODEL || "gemini-3-flash-preview";
+
 export interface StreamFrame {
   frameId: string;
   timestamp: string;
@@ -101,7 +103,7 @@ Return JSON:
         : { fileUri: frame.imageUri };
 
       const response = await ai.models.generateContent({
-        model: "gemini-2.0-flash-exp",
+        model: LLM_MODEL,
         contents: [
           {
             role: "user",

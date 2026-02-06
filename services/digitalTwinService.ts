@@ -14,6 +14,8 @@
 import { GoogleGenAI } from "@google/genai";
 import { Rule, Snapshot } from "../types";
 
+const LLM_MODEL = process.env.LLM_MODEL || "gemini-2.0-flash";
+
 export interface DigitalTwinValidationResult {
   passed: boolean;
   issues: Array<{
@@ -152,8 +154,8 @@ Return your analysis in the JSON format specified.
 
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash-exp",
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      model: LLM_MODEL,
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
       config: {
         systemInstruction: CRITIC_SYSTEM_PROMPT,
         temperature: 0.3, // Lower temperature for more consistent validation
@@ -161,11 +163,46 @@ Return your analysis in the JSON format specified.
       },
     });
 
-    const text = response.text;
-    if (!text) {
-      throw new Error("No response text from Gemini API");
+    // FIX: Access text properly - handle potential SDK version differences
+    // Some SDK versions may have response.response.text() as a method
+    // Others may have response.text as a getter property
+    let resultText: string | undefined;
+    try {
+      // Try direct property access first (matches current SDK types)
+      resultText = response.text;
+      
+      // If that doesn't work, try nested response pattern (for compatibility with different SDK versions)
+      if (!resultText && (response as any).response) {
+        const nestedResponse = (response as any).response;
+        const nestedText = typeof nestedResponse.text === 'function' 
+          ? nestedResponse.text() 
+          : nestedResponse.text;
+        if (nestedText) {
+          resultText = nestedText;
+        }
+      }
+    } catch (error) {
+      console.error("Error accessing response text:", error);
+      throw new Error(`Failed to extract text from API response: ${error instanceof Error ? error.message : String(error)}`);
     }
-    const result = JSON.parse(text) as DigitalTwinValidationResult;
+    
+    if (!resultText) {
+      console.error("Digital Twin API response structure:", {
+        hasText: !!response.text,
+        responseKeys: Object.keys(response),
+        responseType: typeof response,
+        responseStructure: JSON.stringify(response, null, 2).substring(0, 500),
+      });
+      throw new Error("No response text from Gemini API - response.text is empty or undefined");
+    }
+    
+    // Ensure we have a string before parsing
+    const textString = typeof resultText === 'string' ? resultText : String(resultText);
+    if (!textString || textString.trim().length === 0) {
+      throw new Error("Response text is empty after conversion to string");
+    }
+    
+    const result = JSON.parse(textString) as DigitalTwinValidationResult;
 
     // Validate result structure
     if (typeof result.passed !== "boolean") {

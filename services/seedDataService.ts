@@ -1,31 +1,31 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI } from '@google/genai';
+import { getRuntimeZoneDefinition, RuntimeZoneId } from '../runtimeDomain';
 
-const DEFAULT_DB_PROXY = "http://localhost:3011";
+const DEFAULT_DB_PROXY = 'http://localhost:3011';
+const SYSTEM_INSTRUCTION = 'Return STRICT JSON only. No markdown. No extra keys.';
 
-// Zone-aware seed intent types
-export type CreativeSeedIntent = {
-  story: string;
-  style: string;
-  type: string;
-  size: string;
-  persona: string;
-  constraints: string[];
-  designConcept: string;
-  fabricType: string;
-  safetyTags: string[];
+export type CustodySeedIntent = {
+  assetId: string;
+  assetClass: string;
+  requestedAction: 'register_intake' | 'authorize_release' | 'start_transfer' | 'confirm_handoff' | 'force_quarantine';
+  zone: Exclude<RuntimeZoneId, 'INFRASTRUCTURE' | 'MIXED'>;
+  actorType: 'operator' | 'governed_agent' | 'robotic_handler' | 'partner_system';
+  reason: string;
+  provenanceState: 'verified' | 'partial' | 'unknown';
+  sealState: 'sealed' | 'damaged' | 'broken';
+  approvalMode: 'single' | 'dual' | 'emergency_override';
 };
 
 export type InfrastructureSeedIntent = {
-  operation: string; // e.g., "adjust_hvac", "route_elevator", "control_access"
-  zone: string; // JOURNEY, GIFT, WEAR, KIDS
-  parameters: Record<string, any>; // zone-specific parameters
-  priority: "normal" | "high" | "emergency";
+  operation: 'scan_seal' | 'lock_access' | 'stabilize_environment' | 'route_robotic_handoff' | 'capture_playback';
+  zone: Exclude<RuntimeZoneId, 'MIXED'>;
+  endpoint: 'seal_scanner' | 'vault_door' | 'robotic_handler' | 'audit_archive' | 'environmental_controller';
+  severity: 'normal' | 'high' | 'critical';
   description: string;
-  systemType: "hvac" | "elevator" | "doors" | "environment";
-  safetyLevel?: string; // especially for KIDS zone
+  anomaly: 'none' | 'route_drift' | 'identity_gap' | 'telemetry_loss' | 'seal_break';
 };
 
-export type SeedIntent = CreativeSeedIntent | InfrastructureSeedIntent;
+export type SeedIntent = CustodySeedIntent | InfrastructureSeedIntent;
 
 export type SeedResult = {
   intent: SeedIntent;
@@ -42,145 +42,90 @@ export type SeedResult = {
   written?: boolean;
   appended?: boolean;
   stored?: boolean;
-  allowed?: boolean; // Policy validation result
-  isSafety?: boolean; // For KIDS zone safety monitoring
-  isHvac?: boolean; // For HVAC operations
-  zone?: string; // Zone identifier
+  allowed?: boolean;
+  isSafety?: boolean;
+  isInfra?: boolean;
+  zone?: string;
 };
 
-export type SeedProfile = "JOURNEY" | "GIFT" | "WEAR" | "KIDS" | "INFRASTRUCTURE" | "MIXED";
-export type MemoryWriteMode = "dry_run" | "event_working" | "event_then_approve";
+export type SeedProfile = RuntimeZoneId;
+export type MemoryWriteMode = 'dry_run' | 'event_working' | 'event_then_approve';
 
 export type SeedOptions = {
   count: number;
   dbProxyUrl: string;
-  includeKnowledgeBase?: boolean; // Optional, defaults to false
+  includeKnowledgeBase?: boolean;
   profile?: SeedProfile;
   mode?: MemoryWriteMode;
   signal?: AbortSignal;
   onProgress?: (done: number, total: number) => void;
 };
 
-const SYSTEM_INSTRUCTION = `Return STRICT JSON only. No markdown. No extra keys.`;
-
-// Schema for creative zones (JOURNEY, GIFT, WEAR, KIDS)
-const CREATIVE_SEED_SCHEMA = {
-  type: "object",
+const CUSTODY_SEED_SCHEMA = {
+  type: 'object',
   properties: {
     seeds: {
-      type: "array",
+      type: 'array',
       items: {
-        type: "object",
+        type: 'object',
         properties: {
-          story: { type: "string" },
-          style: { type: "string" },
-          type: { type: "string" },
-          size: { type: "string" },
-          persona: { type: "string" },
-          constraints: { type: "array", items: { type: "string" } },
-          designConcept: { type: "string" },
-          fabricType: { type: "string" },
-          safetyTags: { type: "array", items: { type: "string" } }
+          assetId: { type: 'string' },
+          assetClass: { type: 'string' },
+          requestedAction: {
+            type: 'string',
+            enum: ['register_intake', 'authorize_release', 'start_transfer', 'confirm_handoff', 'force_quarantine'],
+          },
+          zone: { type: 'string', enum: ['INGRESS', 'VAULT', 'TRANSFER', 'QUARANTINE'] },
+          actorType: { type: 'string', enum: ['operator', 'governed_agent', 'robotic_handler', 'partner_system'] },
+          reason: { type: 'string' },
+          provenanceState: { type: 'string', enum: ['verified', 'partial', 'unknown'] },
+          sealState: { type: 'string', enum: ['sealed', 'damaged', 'broken'] },
+          approvalMode: { type: 'string', enum: ['single', 'dual', 'emergency_override'] },
         },
-        required: ["story", "style", "type", "size", "persona", "constraints", "designConcept", "fabricType", "safetyTags"]
-      }
-    }
+        required: [
+          'assetId',
+          'assetClass',
+          'requestedAction',
+          'zone',
+          'actorType',
+          'reason',
+          'provenanceState',
+          'sealState',
+          'approvalMode',
+        ],
+      },
+    },
   },
-  required: ["seeds"]
+  required: ['seeds'],
 };
 
-// Schema for infrastructure scenarios
 const INFRASTRUCTURE_SEED_SCHEMA = {
-  type: "object",
+  type: 'object',
   properties: {
     seeds: {
-      type: "array",
+      type: 'array',
       items: {
-        type: "object",
+        type: 'object',
         properties: {
-          operation: { type: "string" },
-          zone: { type: "string" },
-          parameters: { type: "object" },
-          priority: { type: "string", enum: ["normal", "high", "emergency"] },
-          description: { type: "string" },
-          systemType: { type: "string", enum: ["hvac", "elevator", "doors", "environment"] },
-          safetyLevel: { type: "string" }
+          operation: { type: 'string', enum: ['scan_seal', 'lock_access', 'stabilize_environment', 'route_robotic_handoff', 'capture_playback'] },
+          zone: { type: 'string', enum: ['INGRESS', 'VAULT', 'TRANSFER', 'QUARANTINE', 'INFRASTRUCTURE'] },
+          endpoint: { type: 'string', enum: ['seal_scanner', 'vault_door', 'robotic_handler', 'audit_archive', 'environmental_controller'] },
+          severity: { type: 'string', enum: ['normal', 'high', 'critical'] },
+          description: { type: 'string' },
+          anomaly: { type: 'string', enum: ['none', 'route_drift', 'identity_gap', 'telemetry_loss', 'seal_break'] },
         },
-        required: ["operation", "zone", "parameters", "priority", "description", "systemType"]
-      }
-    }
+        required: ['operation', 'zone', 'endpoint', 'severity', 'description', 'anomaly'],
+      },
+    },
   },
-  required: ["seeds"]
-};
-
-const STYLES = ["Minimalist", "Cyberpunk", "Boho", "Vintage", "Abstract Art", "Streetwear"];
-const TYPES = ["T-Shirt", "Hoodie", "Jacket", "Tote Bag"];
-const SIZES = ["XS", "S", "M", "L", "XL", "XXL"];
-
-const buildSeedPrompt = (count: number, profile?: SeedProfile): { prompt: string; schema: any; isInfrastructure: boolean } => {
-  const isInfrastructure = profile === "INFRASTRUCTURE";
-  
-  if (isInfrastructure) {
-    return {
-      prompt: `Generate ${count} infrastructure operation scenarios for smart building systems.
-Each scenario should simulate real-world operations for HVAC, elevators, doors, or room environment systems.
-Operations should target zones: JOURNEY (Journey Studio), GIFT (Gift Forge), WEAR (Fashion Lab), or KIDS (Magic Atelier).
-Include realistic parameters like temperature adjustments, elevator routing priorities, access control actions, or environmental setpoints.
-For KIDS zone, always include enhanced safety monitoring parameters.
-Each item must include: operation (e.g., "adjust_hvac", "route_elevator", "control_access", "adjust_environment"), 
-zone (JOURNEY/GIFT/WEAR/KIDS), parameters (object with relevant fields), priority (normal/high/emergency), 
-description (brief scenario description), systemType (hvac/elevator/doors/environment), and optionally safetyLevel for KIDS zone.`,
-      schema: INFRASTRUCTURE_SEED_SCHEMA,
-      isInfrastructure: true
-    };
-  }
-  
-  let context = "";
-  let zoneFocus = "";
-  switch (profile) {
-    case "JOURNEY":
-      context = "for Journey Studio - storytelling and journey planning experiences";
-      zoneFocus = "Journey Studio focuses on directing personal stories and travel experiences";
-      break;
-    case "GIFT":
-      context = "for Gift Forge - 3D object crafting and fabrication";
-      zoneFocus = "Gift Forge specializes in crafting custom 3D objects and gifts";
-      break;
-    case "WEAR":
-      context = "for Fashion Lab - wearable design and fashion creation";
-      zoneFocus = "Fashion Lab creates custom wearables and fashion items";
-      break;
-    case "KIDS":
-      context = "for Magic Atelier - safe creative play for children";
-      zoneFocus = "Magic Atelier provides safe, supervised creative activities for kids with enhanced safety monitoring";
-      break;
-    case "MIXED":
-      context = "across all creative zones: Journey Studio, Gift Forge, Fashion Lab, and Magic Atelier";
-      zoneFocus = "Mix of storytelling, 3D crafting, wearable design, and kids' creative activities";
-      break;
-    default:
-      context = "for creative zone experiences";
-      zoneFocus = "General creative zone activities";
-  }
-  
-  return {
-    prompt: `Generate ${count} creative seed items ${context}.
-${zoneFocus}
-Each item must include a short story, style, type, size, persona, constraints, designConcept, fabricType, safetyTags.
-Styles: ${STYLES.join(", ")}. Types: ${TYPES.join(", ")}. Sizes: ${SIZES.join(", ")}.
-Keep stories under 40 words. Persona should be "guest" or "staff".
-Constraints should be practical, like "no neon inks" or "avoid metallic threads".
-For KIDS zone, ensure safetyTags include appropriate child-safety considerations.`,
-    schema: CREATIVE_SEED_SCHEMA,
-    isInfrastructure: false
-  };
+  required: ['seeds'],
 };
 
 const parseJson = (text: string) => {
   try {
     return JSON.parse(text);
   } catch {
-    throw new Error("Model returned invalid JSON.");
+    throw new Error('Model returned invalid JSON.');
   }
 };
 
@@ -195,80 +140,97 @@ const fetchJson = async (url: string, options?: RequestInit) => {
 
 const checkAbort = (signal?: AbortSignal) => {
   if (signal?.aborted) {
-    throw new DOMException("Aborted", "AbortError");
+    throw new DOMException('Aborted', 'AbortError');
   }
 };
 
 const loadActiveSnapshot = async (dbProxyUrl: string) => {
   const snapshots = await fetchJson(`${dbProxyUrl}/api/snapshots`);
-  return snapshots.find((snap: any) => snap.isActive) || snapshots[0] || null;
+  return snapshots.find((snapshot: any) => snapshot.isActive) || snapshots[0] || null;
 };
 
-const buildPolicyContext = (intent: SeedIntent, profile: SeedProfile, action: string) => {
-  // Check if intent is infrastructure type
-  if ('operation' in intent && 'zone' in intent) {
-    const infraIntent = intent as InfrastructureSeedIntent;
-    const isKidsZone = infraIntent.zone === "KIDS";
-    const isSafety = infraIntent.systemType === "environment" && isKidsZone;
-    const isHvac = infraIntent.systemType === "hvac";
-    
+const buildSeedPrompt = (
+  count: number,
+  profile: SeedProfile,
+): { prompt: string; schema: any; infrastructureOnly: boolean } => {
+  if (profile === 'INFRASTRUCTURE') {
     return {
-      tags: [
-        `zone=${infraIntent.zone}`,
-        `system=${infraIntent.systemType}`,
-        `operation=${infraIntent.operation}`,
-        `priority=${infraIntent.priority}`,
-        ...(isKidsZone ? ["kids", "safety"] : []),
-        ...(isHvac ? ["hvac"] : []),
-        ...(isSafety ? ["safety_monitoring"] : [])
-      ],
-      signals: {
-        severity: infraIntent.priority === "emergency" ? 0.9 : infraIntent.priority === "high" ? 0.7 : 0.5,
-        zone: infraIntent.zone,
-        system_type: infraIntent.systemType,
-        priority_level: infraIntent.priority,
-        ...(isKidsZone && infraIntent.safetyLevel ? { safety_level: infraIntent.safetyLevel } : {})
-      },
-      values: {
-        zone: infraIntent.zone,
-        operation: infraIntent.operation,
-        ...infraIntent.parameters
-      }
+      infrastructureOnly: true,
+      schema: INFRASTRUCTURE_SEED_SCHEMA,
+      prompt: `Generate ${count} SeedCore infrastructure events for a zero-trust runtime.
+Scenarios must involve actuator endpoints, environmental controls, seal scanners, or playback capture.
+Use zones INGRESS, VAULT, TRANSFER, QUARANTINE, or INFRASTRUCTURE.
+Prefer realistic anomalies such as route drift, identity gaps, telemetry loss, or seal break.`,
     };
   }
-  
-  // Creative zone intent
-  const creativeIntent = intent as CreativeSeedIntent;
-  const isKidsZone = profile === "KIDS";
-  const isSafety = isKidsZone && (creativeIntent.safetyTags?.length > 0 || 
-    JSON.stringify(creativeIntent).toLowerCase().includes("safety"));
-  
+
+  const zoneDef = getRuntimeZoneDefinition(profile === 'MIXED' ? undefined : profile);
+  const zoneContext = zoneDef
+    ? `${zoneDef.name}: ${zoneDef.mission}. Emphasis: ${zoneDef.emphasis}.`
+    : 'Use a balanced mix of ingress, vault, transfer, and quarantine requests.';
+
+  return {
+    infrastructureOnly: false,
+    schema: CUSTODY_SEED_SCHEMA,
+    prompt: `Generate ${count} governed custody requests for the SeedCore runtime.
+${zoneContext}
+Each request must describe a high-value asset action where identity, provenance, seal state, and approvals matter.
+Keep reasons concise and operational. Use varied asset classes such as sealed inventory, assay lot, vault case, or regulated sample.`,
+  };
+};
+
+const buildPolicyContext = (intent: SeedIntent) => {
+  if ('operation' in intent) {
+    return {
+      tags: [
+        `zone=${intent.zone}`,
+        'actuator',
+        `endpoint=${intent.endpoint}`,
+        `operation=${intent.operation}`,
+        `severity=${intent.severity}`,
+        ...(intent.anomaly !== 'none' ? [intent.anomaly, 'anomaly'] : ['healthy']),
+      ],
+      signals: {
+        identity_verified: intent.anomaly === 'identity_gap' ? 0 : 1,
+        route_drift: intent.anomaly === 'route_drift' ? 0.8 : 0,
+        seal_integrity: intent.anomaly === 'seal_break' ? 0.3 : 0.99,
+        release_window_open: intent.severity === 'critical' ? 0 : 1,
+      },
+      values: {
+        zone: intent.zone,
+        endpoint: intent.endpoint,
+        operation: intent.operation,
+      },
+    };
+  }
+
   return {
     tags: [
-      `zone=${profile}`,
-      `action=${action}`,
-      `wearable_type=${creativeIntent.type}`,
-      `wearable_style=${creativeIntent.style}`,
-      ...(isKidsZone ? ["kids", "creative_rendering"] : ["creative_rendering"]),
-      ...(isSafety ? ["safety_monitoring"] : [])
+      `zone=${intent.zone}`,
+      intent.requestedAction.includes('quarantine') ? 'quarantine' : intent.requestedAction.includes('transfer') ? 'transfer' : 'release',
+      intent.assetClass.toLowerCase().replace(/\s+/g, '_'),
+      intent.approvalMode === 'dual' ? 'high_value' : 'standard',
+      'seal',
+      'custody',
     ],
     signals: {
-      risk_score: Math.min(creativeIntent.story.length / 1000, 1),
-      content_category: profile.toLowerCase(),
-      age_rating: isKidsZone ? "kids" : "general",
-      region: "global",
-      device: "router"
+      identity_verified: intent.actorType === 'partner_system' && intent.provenanceState === 'unknown' ? 0 : 1,
+      provenance_score: intent.provenanceState === 'verified' ? 1 : intent.provenanceState === 'partial' ? 0.6 : 0.2,
+      seal_integrity: intent.sealState === 'sealed' ? 1 : intent.sealState === 'damaged' ? 0.7 : 0.2,
+      release_window_open: intent.zone === 'VAULT' && intent.approvalMode !== 'single' ? 1 : intent.zone === 'VAULT' ? 0.5 : 1,
+      route_drift: intent.zone === 'TRANSFER' && intent.sealState === 'broken' ? 0.7 : 0,
     },
     values: {
-      size: creativeIntent.size,
-      persona: creativeIntent.persona,
-      zone: profile
-    }
+      zone: intent.zone,
+      asset_id: intent.assetId,
+      asset_class: intent.assetClass,
+      requested_action: intent.requestedAction,
+    },
   };
 };
 
 const createRunId = () => {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
     return crypto.randomUUID();
   }
   return `run_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
@@ -277,190 +239,104 @@ const createRunId = () => {
 export const seedDataService = {
   async generateSeeds(options: SeedOptions): Promise<SeedResult[]> {
     checkAbort(options.signal);
-    
-    // Get API key from environment variables (same pattern as geminiService.ts)
+
     const apiKey = (process.env.API_KEY || process.env.GEMINI_API_KEY || import.meta.env.VITE_GEMINI_API_KEY) as string;
     if (!apiKey) {
-      throw new Error("No API KEY found. Please set GEMINI_API_KEY or VITE_GEMINI_API_KEY in your .env.local file.");
+      throw new Error('No API key found. Set GEMINI_API_KEY, VITE_GEMINI_API_KEY, or API_KEY.');
     }
 
     const dbProxyUrl = options.dbProxyUrl || DEFAULT_DB_PROXY;
-    const mode = options.mode || "event_working";
-    const profile = options.profile || "MIXED";
-    
+    const profile = options.profile || 'MIXED';
+    const mode = options.mode || 'event_working';
+    const { prompt, schema, infrastructureOnly } = buildSeedPrompt(options.count, profile);
     const ai = new GoogleGenAI({ apiKey });
-    const { prompt, schema, isInfrastructure } = buildSeedPrompt(options.count, profile);
 
-    checkAbort(options.signal);
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: 'gemini-3-flash-preview',
       contents: prompt,
       config: {
         systemInstruction: SYSTEM_INSTRUCTION,
-        responseMimeType: "application/json",
-        responseSchema: schema
-      }
+        responseMimeType: 'application/json',
+        responseSchema: schema,
+      },
     });
 
     if (!response?.text) {
-      throw new Error("No response from Gemini.");
+      throw new Error('No response from Gemini.');
     }
 
     const parsed = parseJson(response.text);
     const seeds: SeedIntent[] = parsed.seeds || [];
-    
-    // Determine if we're processing infrastructure or creative seeds
-    const processingInfrastructure = isInfrastructure || seeds.length > 0 && 'operation' in seeds[0];
-
-    checkAbort(options.signal);
     const snapshot = await loadActiveSnapshot(dbProxyUrl);
     if (!snapshot) {
-      throw new Error("No active snapshot available.");
+      throw new Error('No active snapshot available.');
     }
 
     const results: SeedResult[] = [];
-    const total = seeds.length;
 
-    for (let i = 0; i < seeds.length; i++) {
+    for (let index = 0; index < seeds.length; index += 1) {
       checkAbort(options.signal);
-      
-      const intent = seeds[i];
+
+      const intent = seeds[index];
       const runId = createRunId();
-      
-      // Determine intent type and build appropriate metadata
-      const isInfraIntent = processingInfrastructure && 'operation' in intent;
-      const infraIntent = isInfraIntent ? intent as InfrastructureSeedIntent : null;
-      const creativeIntent = !isInfraIntent ? intent as CreativeSeedIntent : null;
-      
-      // Build ticket ID and title based on intent type
-      const ticketId = isInfraIntent 
-        ? `SEEDCORE-INFRA-${runId.slice(0, 8)}`
-        : `SEEDCORE-MFG-${runId.slice(0, 8)}`;
-      
-      const title = isInfraIntent
-        ? `${infraIntent!.operation} - ${infraIntent!.zone} Zone`
-        : `${creativeIntent!.style} ${creativeIntent!.type} - ${creativeIntent!.persona}`;
-      
-      // Determine zone and safety flags
-      const zone = isInfraIntent ? infraIntent!.zone : profile;
-      const isKidsZone = zone === "KIDS";
-      const isSafety = isKidsZone && (
-        isInfraIntent 
-          ? (infraIntent!.systemType === "environment" || infraIntent!.safetyLevel !== undefined)
-          : (creativeIntent!.safetyTags?.length > 0 || JSON.stringify(creativeIntent).toLowerCase().includes("safety"))
-      );
-      const isHvac = isInfraIntent && infraIntent!.systemType === "hvac";
-
-      // Build PKG policy context (zone-aware)
-      const action = isInfraIntent ? infraIntent!.operation : "generate_design";
-      const policyContext = buildPolicyContext(intent, profile, action);
-      checkAbort(options.signal);
+      const isInfra = infrastructureOnly || 'operation' in intent;
+      const zone = intent.zone;
+      const title = isInfra
+        ? `${intent.endpoint} ${intent.operation} @ ${intent.zone}`
+        : `${intent.requestedAction} ${intent.assetClass} (${intent.assetId})`;
+      const ticketId = isInfra ? `SC-INFRA-${runId.slice(0, 8)}` : `SC-CUSTODY-${runId.slice(0, 8)}`;
+      const policyContext = buildPolicyContext(intent);
       const policyDecision = await fetchJson(`${dbProxyUrl}/api/policy/evaluate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ snapshotId: snapshot.id, context: policyContext }),
-        signal: options.signal
+        signal: options.signal,
       });
 
       let eventMemoryId: string | undefined;
       let knowledgeMemoryId: string | undefined;
-      let written = false;
-      let appended = false;
-      let stored = false;
 
-      // Only write if not in dry_run mode
-      if (mode !== "dry_run") {
-        // Write to event_working if allowed
-        if (policyDecision.allowed) {
-          checkAbort(options.signal);
-          
-          // Determine category and content based on intent type
-          const category = isInfraIntent 
-            ? `infrastructure_${infraIntent!.systemType}_operation`
-            : `${profile.toLowerCase()}_design_seed`;
-          
-          const content = isInfraIntent
-            ? infraIntent!.description
-            : creativeIntent!.story;
-          
-          // Build metadata based on intent type
-          const metadata: any = {
-            intent,
-            snapshot,
-            policyDecision,
-            source_modality: "text",
-            zone,
-            ticket: {
-              ticketId,
-              title,
-              runId
-            }
-          };
-          
-          if (isInfraIntent) {
-            metadata.operation = infraIntent!.operation;
-            metadata.systemType = infraIntent!.systemType;
-            metadata.parameters = infraIntent!.parameters;
-            metadata.priority = infraIntent!.priority;
-            if (infraIntent!.safetyLevel) {
-              metadata.safetyLevel = infraIntent!.safetyLevel;
-            }
-          } else {
-            metadata.design = {
-              designConcept: creativeIntent!.designConcept,
-              fabricType: creativeIntent!.fabricType,
-              safetyTags: creativeIntent!.safetyTags
-            };
-          }
-          
-          const eventMemory = await fetchJson(`${dbProxyUrl}/api/memory/append`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              tier: "event_working",
-              category,
-              content,
-              runId,
-              metadata
-            }),
-            signal: options.signal
-          });
-          eventMemoryId = eventMemory.id;
-          written = true;
-          appended = true;
-        }
+      if (mode !== 'dry_run' && policyDecision.allowed) {
+        const eventMemory = await fetchJson(`${dbProxyUrl}/api/memory/append`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tier: 'event_working',
+            category: isInfra ? `runtime_${intent.zone.toLowerCase()}_endpoint_event` : `runtime_${intent.zone.toLowerCase()}_custody_request`,
+            content: isInfra ? intent.description : intent.reason,
+            runId,
+            metadata: {
+              intent,
+              snapshot,
+              policyDecision,
+              zone,
+              ticket: { ticketId, title, runId },
+            },
+          }),
+          signal: options.signal,
+        });
+        eventMemoryId = eventMemory.id;
 
-        // Write to knowledge_base if includeKnowledgeBase and allowed
-        if (options.includeKnowledgeBase && policyDecision.allowed && mode === "event_then_approve") {
-          // In event_then_approve mode, we write to event_working first, then user can approve later
-          // For now, we don't auto-promote, but we could add that logic here
-        } else if (options.includeKnowledgeBase && policyDecision.allowed && mode === "event_working") {
-          // Only write to knowledge_base if explicitly requested
-          checkAbort(options.signal);
-          const knowledgeCategory = isInfraIntent
-            ? `infrastructure_${infraIntent!.systemType}_ticket`
-            : `${profile.toLowerCase()}_design_ticket`;
-          
+        if (options.includeKnowledgeBase) {
           const knowledgeMemory = await fetchJson(`${dbProxyUrl}/api/memory/append`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              tier: "knowledge_base",
-              category: knowledgeCategory,
+              tier: 'knowledge_base',
+              category: isInfra ? `runtime_${intent.zone.toLowerCase()}_endpoint_ticket` : `runtime_${intent.zone.toLowerCase()}_custody_ticket`,
               content: ticketId,
               runId,
               metadata: {
-                ticket: { ticketId, title, runId },
                 intent,
                 snapshot,
                 policyDecision,
-                zone
-              }
+                zone,
+                ticket: { ticketId, title, runId },
+              },
             }),
-            signal: options.signal
+            signal: options.signal,
           });
           knowledgeMemoryId = knowledgeMemory.id;
-          stored = true;
         }
       }
 
@@ -469,26 +345,21 @@ export const seedDataService = {
         policyDecision,
         eventMemoryId,
         knowledgeMemoryId,
-        ticket: {
-          ticketId,
-          title,
-          runId
-        },
+        ticket: { ticketId, title, runId },
         id: ticketId,
         title,
-        written,
-        appended,
-        stored,
+        written: Boolean(eventMemoryId),
+        appended: Boolean(eventMemoryId),
+        stored: Boolean(knowledgeMemoryId),
         allowed: policyDecision.allowed,
-        isSafety,
-        isHvac,
-        zone
+        isSafety: zone === 'QUARANTINE' || (!isInfra && intent.sealState !== 'sealed'),
+        isInfra,
+        zone,
       });
 
-      // Report progress
-      options.onProgress?.(i + 1, total);
+      options.onProgress?.(index + 1, seeds.length);
     }
 
     return results;
-  }
+  },
 };

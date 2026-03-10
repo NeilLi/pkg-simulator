@@ -64,7 +64,7 @@ export const ControlPlane: React.FC = () => {
 
   // State for the pipeline
   const [intent, setIntent] = useState(
-    'We are seeing too many false positive fire alarms from toaster ovens in standard rooms. Adjust threshold.'
+    'Vault releases are reaching the transfer corridor without dual approval. Tighten the release contract and quarantine route drift faster.'
   );
   
   // Zone-aware evolution
@@ -404,7 +404,7 @@ export const ControlPlane: React.FC = () => {
     setValidationResult(null);
     setDeploymentPercent(0);
 
-    const intentForRun = intent.trim() || 'Initialize baseline policy snapshot for hotel operations';
+    const intentForRun = intent.trim() || 'Initialize baseline policy snapshot for governed runtime operations';
     setRunIntent(intentForRun);
 
     setIsEvolving(true);
@@ -839,8 +839,13 @@ export const ControlPlane: React.FC = () => {
       // Also run standard validation for consistency checks
       const standardResult = await runValidationAgent(draftSnapshot.id, snapshotRules);
       
-      // Combine results: Digital Twin must pass AND standard validation must pass
-      const combinedSuccess = digitalTwinResult.passed && standardResult.success;
+      // Normalize Digital Twin pass/fail locally to avoid false negatives from non-critical warnings.
+      const criticalHardwareIssues = digitalTwinResult.issues.filter(i => i.severity === 'critical');
+      const warningHardwareIssues = digitalTwinResult.issues.filter(i => i.severity === 'warning');
+      const digitalTwinPassesGate = criticalHardwareIssues.length === 0;
+      
+      // Combine results: standard validation must pass and there must be no critical hardware issues.
+      const combinedSuccess = digitalTwinPassesGate && standardResult.success;
       
       // Enhanced validation result with Digital Twin details
       const enhancedResult: ValidationRun = {
@@ -851,7 +856,7 @@ export const ControlPlane: React.FC = () => {
           simulationScore: combinedSuccess ? (digitalTwinResult.validationScore * 100) : 0,
           conflicts: [
             ...(standardResult.report?.conflicts || []),
-            ...(digitalTwinResult.issues.filter(i => i.severity === 'critical').map(i => 
+            ...(criticalHardwareIssues.map(i => 
               `[Hardware Constraint] ${i.ruleName || 'Unknown'}: ${i.issue}`
             ))
           ],
@@ -866,10 +871,12 @@ export const ControlPlane: React.FC = () => {
       if (combinedSuccess) {
         addLog('VALIDATION', `Validation PASSED. Digital Twin Score: ${(digitalTwinResult.validationScore * 100).toFixed(1)}%`, 'SUCCESS', runId);
         addLog('VALIDATION', `Hardware constraints validated: All rules compatible with physical systems.`, 'SUCCESS', runId);
+        if (warningHardwareIssues.length > 0) {
+          addLog('VALIDATION', `Non-blocking hardware warnings: ${warningHardwareIssues.length}. Review recommendations before production rollout.`, 'WARN', runId);
+        }
       } else {
-        const criticalIssues = digitalTwinResult.issues.filter(i => i.severity === 'critical').length;
-        addLog('VALIDATION', `Validation FAILED. Critical hardware issues: ${criticalIssues}, Conflicts: ${standardResult.report?.conflicts?.length ?? 0}`, 'ERROR', runId);
-        if (criticalIssues > 0) {
+        addLog('VALIDATION', `Validation FAILED. Critical hardware issues: ${criticalHardwareIssues.length}, Conflicts: ${standardResult.report?.conflicts?.length ?? 0}`, 'ERROR', runId);
+        if (criticalHardwareIssues.length > 0) {
           addLog('VALIDATION', `Hardware constraint violations detected. Review Digital Twin report before deployment.`, 'ERROR', runId);
         }
       }
@@ -1103,10 +1110,10 @@ export const ControlPlane: React.FC = () => {
               onChange={(e) => setSelectedZone(e.target.value)}
               className="px-3 py-2 border border-gray-300 rounded-md text-sm"
             >
-              <option value="JOURNEY">Journey Studio</option>
-              <option value="GIFT">Gift Forge</option>
-              <option value="WEAR">Fashion Lab</option>
-              <option value="KIDS">Magic Atelier</option>
+              <option value="INGRESS">Event Ingress</option>
+              <option value="VAULT">Vault Control</option>
+              <option value="TRANSFER">Transfer Corridor</option>
+              <option value="QUARANTINE">Quarantine Bay</option>
               <option value="INFRASTRUCTURE">Building Systems</option>
             </select>
           </div>
@@ -1534,15 +1541,13 @@ export const ControlPlane: React.FC = () => {
                                   className="w-full px-3 py-2 border border-gray-300 rounded text-sm"
                                 >
                                   <option value="router">Router (Global)</option>
-                                  <option value="HVAC_CONTROLLER">HVAC Controller</option>
-                                  <option value="ELEVATOR_BANK_A">Elevator Bank A</option>
-                                  <option value="KIDS_ZONE_GATEWAY">Kids Zone Gateway</option>
-                                  <option value="JOURNEY_ZONE_GATEWAY">Journey Zone Gateway</option>
-                                  <option value="GIFT_ZONE_GATEWAY">Gift Zone Gateway</option>
-                                  <option value="WEAR_ZONE_GATEWAY">Wear Zone Gateway</option>
-                                  <option value="edge:door">Edge: Door Systems</option>
-                                  <option value="edge:robot">Edge: Robot Fleet</option>
-                                  <option value="edge:camera">Edge: Camera Network</option>
+                                  <option value="INGRESS_PORTAL">Ingress Portal</option>
+                                  <option value="VAULT_GATEWAY">Vault Gateway</option>
+                                  <option value="TRANSFER_BAY_CONTROLLER">Transfer Bay Controller</option>
+                                  <option value="QUARANTINE_LOCKER">Quarantine Locker</option>
+                                  <option value="edge:robotic_handler">Robotic Handler</option>
+                                  <option value="edge:seal_scanner">Seal Scanner</option>
+                                  <option value="edge:door_controller">Door Controller</option>
                                 </select>
                              </div>
                              
@@ -1620,15 +1625,13 @@ export const ControlPlane: React.FC = () => {
                                className="w-full px-3 py-2 border border-blue-300 rounded text-sm"
                              >
                                <option value="router">Router (Global)</option>
-                               <option value="HVAC_CONTROLLER">HVAC Controller</option>
-                               <option value="ELEVATOR_BANK_A">Elevator Bank A</option>
-                               <option value="KIDS_ZONE_GATEWAY">Kids Zone Gateway</option>
-                               <option value="JOURNEY_ZONE_GATEWAY">Journey Zone Gateway</option>
-                               <option value="GIFT_ZONE_GATEWAY">Gift Zone Gateway</option>
-                               <option value="WEAR_ZONE_GATEWAY">Wear Zone Gateway</option>
-                               <option value="edge:door">Edge: Door Systems</option>
-                               <option value="edge:robot">Edge: Robot Fleet</option>
-                               <option value="edge:camera">Edge: Camera Network</option>
+                               <option value="INGRESS_PORTAL">Ingress Portal</option>
+                               <option value="VAULT_GATEWAY">Vault Gateway</option>
+                               <option value="TRANSFER_BAY_CONTROLLER">Transfer Bay Controller</option>
+                               <option value="QUARANTINE_LOCKER">Quarantine Locker</option>
+                               <option value="edge:robotic_handler">Robotic Handler</option>
+                               <option value="edge:seal_scanner">Seal Scanner</option>
+                               <option value="edge:door_controller">Door Controller</option>
                              </select>
                           </div>
                           

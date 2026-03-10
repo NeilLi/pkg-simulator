@@ -31,23 +31,22 @@ export enum AppPage {
 /**
  * Feature Sequence - System Lifecycle Order
  * 
- * Organized by "The Trinity" (Mother-Core-Simulator):
+ * Organized by the SeedCore runtime lifecycle:
  * 
- * 1. Foundation (Core) - Stateful persistent layers and Unified Cortex
- *    - Initialize: Bootstrap scenarios and baseline configurations
- *    - Knowledge Graph: Semantic context and relationships
- *    - Unified Memory: Tier 1 (Multimodal) and Tier 2/3 (Graph) memory
+ * 1. Foundation - Baseline runtime surfaces and unified memory
+ *    - Initialize: Bootstrap the governed runtime baseline
+ *    - Knowledge Graph: Semantic context and custody relationships
+ *    - Unified Memory: Event, knowledge, and playback memory tiers
  * 
- * 2. Creation (Simulator/Mother) - Gemini acts as architect
- *    - Seed Generator: Mother layer where Gemini creates initial logic
- *    - Policy Studio: Laboratory for rules, conditions, emissions (with Environmental Critic)
- *    - Policy Factory: Mass production of policies
+ * 2. Creation - Mission seeding and policy authoring
+ *    - Seed Generator: Generate governed mission requests and incident scenarios
+ *    - Policy Studio: Laboratory for rules, conditions, emissions, and runtime facts
  * 
- * 3. Operations (Cockpit) - Edge where perception meets policy
- *    - Simulator: Virtual world for testing scenarios
- *    - Governance Cockpit: Real-time command center (Temporal + Multimodal)
- *    - Control Plane: Hot-swapping snapshots via Redis pub/sub
- *    - Dashboard: Traditional monitoring and observation
+ * 3. Operations - Where perception, policy, and actuator control meet
+ *    - Simulator: Virtual world for zero-trust mission testing
+ *    - Governance Cockpit: Real-time command center (temporal + custody + digital twin)
+ *    - Control Plane: Policy evolution, promotion, and deployment orchestration
+ *    - Dashboard: Runtime monitoring and operational posture
  */
 export const FEATURE_SEQUENCE: AppPage[] = [
   // Foundation (Core) - Stateful persistent layers
@@ -94,7 +93,7 @@ export const FEATURE_GROUPS: Record<AppPage, FeatureGroup> = {
 
 export const GROUP_LABELS: Record<FeatureGroup, string> = {
   [FeatureGroup.FOUNDATION]: 'Foundation (Core)',
-  [FeatureGroup.CREATION]: 'Creation (Mother)',
+  [FeatureGroup.CREATION]: 'Creation',
   [FeatureGroup.OPERATIONS]: 'Operations (Cockpit)',
 };
 
@@ -120,43 +119,43 @@ export const PAGE_METADATA: Partial<Record<AppPage, PageMetadata>> = {
   [AppPage.INITIALIZATION]: {
     label: 'Initialize',
     adminOnly: true,
-    description: 'Bootstrap system scenarios and baseline configurations',
+    description: 'Bootstrap governed runtime baselines, zones, and actuator surfaces',
   },
   [AppPage.KNOWLEDGE]: {
     label: 'Knowledge Graph',
-    description: 'View policy knowledge graph and relationships',
+    description: 'View policy knowledge graph, custody relationships, and runtime facts',
   },
   [AppPage.MEMORY]: {
     label: 'Unified Memory',
-    description: 'Browse temporal facts and system memory',
+    description: 'Browse temporal facts, playback evidence, and system memory',
   },
   [AppPage.SEED_DATA]: {
-    label: 'Seed Generator',
-    description: 'Generate wearable design seeds using Gemini AI and PKG policy',
+    label: 'Mission Seeds',
+    description: 'Generate governed mission requests and incident scenarios using Gemini and PKG policy',
   },
   [AppPage.POLICY_STUDIO]: {
     label: 'Policy Studio',
-    description: 'Create and evolve policy artifacts with AI-assisted generation',
+    description: 'Create and evolve runtime policy artifacts with AI-assisted generation',
   },
   [AppPage.SIMULATOR]: {
     label: 'Simulator',
-    description: 'Simulate policy outcomes before deployment',
+    description: 'Simulate zero-trust policy outcomes before deployment',
   },
   [AppPage.CONTROL_PLANE]: {
     label: 'Control Plane',
     opsOnly: true,
-    description: 'Autonomous policy evolution and deployment pipeline',
+    description: 'Policy evolution, validation, and deployment pipeline for runtime surfaces',
   },
   [AppPage.DASHBOARD]: {
     label: 'Dashboard',
-    description: 'Real-time system observation and health monitoring',
+    description: 'Runtime observation, deployment posture, and safety monitoring',
   },
   [AppPage.GOVERNANCE_COCKPIT]: {
     label: 'Governance Cockpit',
-    description: 'Mission Control Center: Real-time perception feed (Step 7), temporal timeline (Step 6), and digital twin validation (Step 5)',
+    description: 'Mission control center for perception, temporal policy, custody state, and digital twin validation',
   },
   [AppPage.SIMULATOR]: {
     label: 'Simulator',
-    description: 'Virtual world for testing policy scenarios before deployment. Adjacent to Governance Cockpit for seamless workflow.',
+    description: 'Virtual world for zero-trust runtime testing before deployment. Adjacent to Governance Cockpit for seamless workflow.',
   },
 };

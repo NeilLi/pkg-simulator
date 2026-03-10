@@ -136,15 +136,13 @@ export interface UnifiedMemoryItem {
 
 export type DeploymentTarget =
   | 'router'
-  | 'HVAC_CONTROLLER'
-  | 'ELEVATOR_BANK_A'
-  | 'KIDS_ZONE_GATEWAY'
-  | 'JOURNEY_ZONE_GATEWAY'
-  | 'GIFT_ZONE_GATEWAY'
-  | 'WEAR_ZONE_GATEWAY'
-  | 'edge:robot'
-  | 'edge:camera'
-  | 'edge:door'
+  | 'INGRESS_PORTAL'
+  | 'VAULT_GATEWAY'
+  | 'TRANSFER_BAY_CONTROLLER'
+  | 'QUARANTINE_LOCKER'
+  | 'edge:robotic_handler'
+  | 'edge:seal_scanner'
+  | 'edge:door_controller'
   | 'cloud:simulation';
 
 export interface Deployment {
@@ -195,14 +193,18 @@ export interface ValidationRun {
       recommendation?: string;
     }>;
     hardwareConstraints?: {
-      printer?: {
-        maxInkPerLayer: number;
-        maxLayers: number;
-        supportedFabricTypes: string[];
+      roboticHandler?: {
+        maxPayloadKg: number;
+        allowedZoneTransitions: string[];
+        requiresDualApproval: boolean;
       };
-      painter?: {
-        maxColors: number;
-        precision: 'high' | 'medium' | 'low';
+      sealScanner?: {
+        minimumConfidence: number;
+        supportedSealClasses: string[];
+      };
+      vaultDoor?: {
+        maxOpenSeconds: number;
+        failMode: 'fail-secure' | 'fail-safe';
       };
     };
   };

@@ -14,13 +14,13 @@
  * const task = await seedcoreService.createQuery("Analyze energy usage");
  * 
  * // Create a device action
- * await seedcoreService.createDeviceAction("on", "light", { room: "1203" });
+ * await seedcoreService.createDeviceAction("lock", "vault_door", { zone: "VAULT" });
  * 
  * // Create a voice task with multimodal envelope
  * await seedcoreService.createVoiceTask(
- *   "Turn off the lights",
- *   "s3://hotel-assets/audio/clip_99.wav",
- *   { confidence: 0.98, location_context: "lobby" }
+ *   "Seal breach detected at transfer bay",
+ *   "s3://seedcore-assets/audio/transfer-bay-alert.wav",
+ *   { confidence: 0.98, location_context: "transfer_bay" }
  * );
  * 
  * // List tasks with filters
@@ -88,20 +88,20 @@ export interface ReadinessResponse {
 
 export type PKGMode = "advisory" | "control";
 
-export interface HotelTaskFacts {
+export interface RuntimeTaskFacts {
   namespace: string;
   subject: string;
-  predicate: string; // e.g., "request_diy_print", "request_magic_atelier", etc.
+  predicate: string; // e.g., "authorize_release", "start_transfer", etc.
   object_data?: Record<string, any>;
 }
 
 export interface PKGEvaluateAsyncRequest {
-  task_facts: HotelTaskFacts;
+  task_facts: RuntimeTaskFacts;
   snapshot_id?: number;
   current_time?: string; // ISO8601 datetime string
   embedding?: number[]; // 1024d embedding vector
   mode?: PKGMode; // Default: "advisory"
-  zone_id?: string; // e.g., "magic_atelier", "journey_studio"
+  zone_id?: string; // e.g., "vault", "transfer"
 }
 
 export interface PKGEvaluateResponse {
@@ -685,7 +685,7 @@ class SeedCoreService {
   /**
    * Evaluate a task using PKG (Policy Knowledge Graph) async evaluation
    * 
-   * This is a hotel-simulator friendly wrapper around PKGManager/PKGEvaluator.
+   * This is a runtime-simulator friendly wrapper around PKGManager/PKGEvaluator.
    * It takes a simple SPO-style triple (namespace/subject/predicate/object_data)
    * and returns a policy decision with emissions and provenance.
    * 
@@ -698,13 +698,13 @@ class SeedCoreService {
    * ```typescript
    * const result = await seedcoreService.evaluatePKGAsync({
    *   task_facts: {
-   *     namespace: "hospitality",
-   *     subject: "guest:neil",
-   *     predicate: "request_diy_print",
-   *     object_data: { material: "PLA", size: 12 }
+   *     namespace: "seedcore",
+   *     subject: "operator:neil",
+   *     predicate: "authorize_release",
+   *     object_data: { asset_id: "LOT-42", asset_class: "sealed_inventory" }
    *   },
    *   snapshot_id: 1,
-   *   zone_id: "wearable_studio"
+   *   zone_id: "vault"
    * });
    * 
    * if (result.decision.allowed) {
@@ -811,10 +811,10 @@ class SeedCoreService {
    * ```typescript
    * const result = await seedcoreService.evaluatePKGAsync({
    *   task_facts: {
-   *     namespace: "hospitality",
-   *     subject: "guest:neil",
-   *     predicate: "request_diy_print",
-   *     object_data: { material: "PLA", size: 12 }
+   *     namespace: "seedcore",
+   *     subject: "operator:neil",
+   *     predicate: "authorize_release",
+   *     object_data: { asset_id: "LOT-42", asset_class: "sealed_inventory" }
    *   }
    * });
    * 

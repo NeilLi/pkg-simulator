@@ -75,10 +75,10 @@ export const generateRuleFromNaturalLanguage = async (params: GenerateRuleParams
     const context = contextParts.length > 0 ? `\n\nContext:\n${contextParts.join('\n')}\n` : '';
     
     const systemInstruction = `
-      You are an expert SeedCore Policy Knowledge Graph engineer for a futuristic hotel (2030+).
-      Convert natural language hospitality policies into JSON objects matching the Rule interface.
+      You are an expert SeedCore Policy Knowledge Graph engineer for a zero-trust runtime.
+      Convert natural language runtime policies into JSON objects matching the Rule interface.
       
-      Domain: Service robots, Smart HVAC, Emergency Protocols, Guest Comfort, 3D Printing, Room Management.
+      Domain: Governed Agents, vault control, robotic handoff, seal integrity, operator approvals, and quarantine recovery.
 
       Interfaces:
       enum PkgConditionType { TAG, SIGNAL, VALUE, FACT }
@@ -93,7 +93,7 @@ export const generateRuleFromNaturalLanguage = async (params: GenerateRuleParams
         "ruleSource": string (optional description),
         "conditions": Array<{ 
           "conditionType": "TAG" | "SIGNAL" | "VALUE" | "FACT",
-          "conditionKey": string (e.g., "tags", "x6", "temperature", "room"),
+          "conditionKey": string (e.g., "tags", "identity_verified", "seal_integrity", "release_window_open"),
           "operator": "=" | "!=" | ">" | ">=" | "<" | "<=" | "EXISTS" | "IN" | "MATCHES",
           "value": string (optional, required for most operators except EXISTS)
         }>,
@@ -105,26 +105,24 @@ export const generateRuleFromNaturalLanguage = async (params: GenerateRuleParams
       }
       
       Common Subtask Types:
-      - isolate_room_hvac, dispatch_inspection_robot, notify_human_supervisor, prepare_guest_relocation
-      - activate_emergency_protocol, contact_external_service, fabricate_part, install_part
-      - adjust_room_environment, update_guest_profile
+      - verify_identity_and_provenance, authorize_release_window, lock_zone_access, dispatch_operator_review
+      - route_robotic_handoff, quarantine_asset_lot, capture_playback_evidence, sync_custody_memory
+      - notify_control_plane, stabilize_environmental_controls
       
-      Example Input: "If emergency keywords and HVAC issues are detected with high confidence, isolate the room HVAC, dispatch inspection robot, notify supervisor, and prepare guest relocation."
+      Example Input: "If a high-value vault release is requested without verified identity, lock the zone, dispatch operator review, and notify the control plane."
       Example Output: {
-        "ruleName": "emergency_hvac_smoke_detection",
+        "ruleName": "deny_unknown_actor_release",
         "priority": 10,
         "engine": "wasm",
-        "ruleSource": "Emergency HVAC and Smoke Detection Protocol",
+        "ruleSource": "Deny vault release until identity and approvals are verified",
         "conditions": [
-          { "conditionType": "TAG", "conditionKey": "tags", "operator": "MATCHES", "value": ".*emergency.*" },
-          { "conditionType": "TAG", "conditionKey": "tags", "operator": "MATCHES", "value": ".*hvac.*" },
-          { "conditionType": "SIGNAL", "conditionKey": "x6", "operator": ">=", "value": "0.8" }
+          { "conditionType": "TAG", "conditionKey": "tags", "operator": "MATCHES", "value": ".*release.*" },
+          { "conditionType": "SIGNAL", "conditionKey": "identity_verified", "operator": "<", "value": "1" }
         ],
         "emissions": [
-          { "subtaskName": "isolate_room_hvac", "relationshipType": "ORDERS", "params": {} },
-          { "subtaskName": "dispatch_inspection_robot", "relationshipType": "ORDERS", "params": {} },
-          { "subtaskName": "notify_human_supervisor", "relationshipType": "ORDERS", "params": {} },
-          { "subtaskName": "prepare_guest_relocation", "relationshipType": "ORDERS", "params": {} }
+          { "subtaskName": "lock_zone_access", "relationshipType": "GATE", "params": {} },
+          { "subtaskName": "dispatch_operator_review", "relationshipType": "ORDERS", "params": {} },
+          { "subtaskName": "notify_control_plane", "relationshipType": "EMITS", "params": {} }
         ]
       }
       
@@ -209,64 +207,63 @@ export const generateFactFromNaturalLanguage = async (params: GenerateFactParams
     const context = contextParts.length > 0 ? `\n\nContext:\n${contextParts.join('\n')}\n` : '';
     
     const systemInstruction = `
-      You are an expert SeedCore Policy Knowledge Graph engineer for a futuristic hotel (2030+).
+      You are an expert SeedCore Policy Knowledge Graph engineer for a zero-trust runtime.
       Convert natural language descriptions into Fact objects for the PKG system.
       
-      Domain: Service robots, Smart rooms (HVAC, lighting, privacy glass), 3D printers, Wearable devices, 
-      Digital concierges, Human staff, External city services (police, fire, hospitals).
+      Domain: Governed Agents, actuator endpoints, vault control, seal scanners, custody memory,
+      operator approvals, and quarantine recovery.
       
       Fact Structure:
       {
-        "namespace": string (e.g., "hotel", "default"),
-        "subject": string (e.g., "unit:robot_01", "room:1208", "guest:john_doe", "service:external_police"),
-        "predicate": string (e.g., "hasCapabilities", "hasType", "hasSystems", "hasAccess"),
+        "namespace": string (e.g., "seedcore", "default"),
+        "subject": string (e.g., "system:robotic_handler", "zone:VAULT", "policy:high_value_release"),
+        "predicate": string (e.g., "hasCapabilities", "hasRuntimeSurface", "requiresControls"),
         "object": object (JSON object with relevant properties)
       }
       
       Common Patterns:
-      - Plug-in units: subject="unit:NAME", predicate="hasCapabilities", object={capabilities: [], constraints: [], skills: [], authority: ""}
-      - Rooms: subject="room:NUMBER", predicate="hasSystems", object={systems: [], floor: NUMBER}
-      - Services: subject="service:NAME", predicate="hasType", object={type: "", capabilities: [], contact: ""}
-      - Guests: subject="guest:ID", predicate="hasAccess", object={level: "", services: []}
+      - Systems: subject="system:NAME", predicate="hasCapabilities", object={capabilities: [], controlType: "", constraints: []}
+      - Zones: subject="zone:NAME", predicate="hasRuntimeSurface", object={name: "", mission: "", emphasis: ""}
+      - Policies: subject="policy:NAME", predicate="requiresControls", object={approvals: NUMBER, releaseWindowMinutes: NUMBER}
+      - Assets: subject="asset_class:NAME", predicate="hasCustodyRequirements", object={requireSealIntegrity: true}
       
       Examples:
-      Input: "A cleaning robot on floor 1-10 that works 8am to 10pm"
+      Input: "A robotic handler that can move sealed lots from the vault to the transfer corridor"
       Output: {
-        "namespace": "hotel",
-        "subject": "unit:cleaning_robot_01",
+        "namespace": "seedcore",
+        "subject": "system:robotic_handler",
         "predicate": "hasCapabilities",
         "object": {
-          "capabilities": ["deliver", "scan", "clean"],
-          "constraints": ["floor=1-10", "hours=08:00-22:00"],
-          "skills": ["logistics"],
-          "authority": "execution_only"
+          "capabilities": ["vault_pick", "handoff_transfer"],
+          "constraints": ["VAULT->TRANSFER only"],
+          "controlType": "actuator"
         }
       }
       
-      Input: "Room 1208 has HVAC, lighting, and privacy glass systems"
+      Input: "The vault requires dual approval and a 15 minute release window"
       Output: {
-        "namespace": "hotel",
-        "subject": "room:1208",
-        "predicate": "hasSystems",
+        "namespace": "seedcore",
+        "subject": "policy:high_value_release",
+        "predicate": "requiresControls",
         "object": {
-          "systems": ["hvac", "lighting", "privacy_glass"],
-          "floor": 12
+          "approvals": 2,
+          "releaseWindowMinutes": 15
         }
       }
       
-      Input: "External police service for emergency response, contact 911"
+      Input: "The quarantine bay isolates broken seals and route drift incidents"
       Output: {
-        "namespace": "hotel",
-        "subject": "service:external_police",
-        "predicate": "hasType",
+        "namespace": "seedcore",
+        "subject": "zone:QUARANTINE",
+        "predicate": "hasRuntimeSurface",
         "object": {
-          "type": "external",
-          "capabilities": ["emergency_response"],
-          "contact": "911"
+          "name": "Quarantine Bay",
+          "mission": "Contain anomalies before irreversible handoff",
+          "emphasis": "Recovery"
         }
       }
       
-      Always use namespace "hotel" for hotel-related facts.
+      Always use namespace "seedcore" for runtime-related facts.
       Generate appropriate subject identifiers based on the description.
       Return ONLY valid JSON matching the Fact structure.
     `;
@@ -289,7 +286,7 @@ export const generateFactFromNaturalLanguage = async (params: GenerateFactParams
     
     // Validate and return structured fact
     return {
-      namespace: data.namespace || 'hotel',
+      namespace: data.namespace || 'seedcore',
       subject: data.subject || '',
       predicate: data.predicate || '',
       object: data.object || {},
@@ -314,7 +311,7 @@ export const generateEvolutionPlan = async (
   try {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const systemInstruction = `
-      You are the "Policy Evolution Agent" for SeedCore (Hospitality PKG).
+      You are the "Policy Evolution Agent" for SeedCore runtime governance.
       Your job is to analyze human intent or failure logs and propose specific, structured changes to the policy graph.
 
       Rules:

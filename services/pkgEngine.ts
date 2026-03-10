@@ -25,6 +25,8 @@ export const hydrateContext = (
   const entities = new Set<string>();
   if (rawTags['room']) entities.add(`room:${rawTags['room']}`);
   if (rawTags['guest_id']) entities.add(`guest:${rawTags['guest_id']}`);
+  if (rawTags['asset_id']) entities.add(`asset:${rawTags['asset_id']}`);
+  if (rawTags['actor_id']) entities.add(`actor:${rawTags['actor_id']}`);
   
   hydrationLogs.push(`Identified anchor entities: ${Array.from(entities).join(', ') || 'None'}`);
 

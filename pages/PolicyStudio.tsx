@@ -58,7 +58,7 @@ export const PolicyStudio: React.FC = () => {
   const [generatingFact, setGeneratingFact] = useState(false);
   const [newFact, setNewFact] = useState({
     snapshotId: null as number | null,
-    namespace: 'hotel',
+    namespace: 'seedcore',
     subject: '',
     predicate: '',
     object: '{}',
@@ -103,7 +103,7 @@ export const PolicyStudio: React.FC = () => {
 
   // Design governance setup state
   const [settingUpDesignGov, setSettingUpDesignGov] = useState(false);
-  const [designGovMessage, setDesignGovMessage] = useState<string | null>(null);
+  const [runtimePackMessage, setRuntimePackMessage] = useState<string | null>(null);
 
   // Rules list view state
   const [ruleSearch, setRuleSearch] = useState('');
@@ -209,7 +209,7 @@ export const PolicyStudio: React.FC = () => {
     setNewSnapshotEnv(selectedEnv);
 
     const existingVersions = snapshots.map(s => s.version);
-    const baseName = 'hotel-2030';
+    const baseName = 'runtime-baseline';
     setNewSnapshotVersion(generateVersion(baseName, existingVersions));
 
     setShowNewSnapshotModal(true);
@@ -290,19 +290,19 @@ export const PolicyStudio: React.FC = () => {
   };
 
   /** -----------------------------
-   * Design Governance Setup
+   * Runtime Starter Pack Setup
    * ------------------------------*/
 
   const handleSetupDesignGovernance = async () => {
     const targetSnapshotId = activeSnapshotId || snapshots[0]?.id;
     if (!targetSnapshotId) {
-      setDesignGovMessage('❌ Please select or create a snapshot first');
-      setTimeout(() => setDesignGovMessage(null), 3000);
+      setRuntimePackMessage('❌ Please select or create a snapshot first');
+      setTimeout(() => setRuntimePackMessage(null), 3000);
       return;
     }
 
     setSettingUpDesignGov(true);
-    setDesignGovMessage(null);
+    setRuntimePackMessage(null);
 
     try {
       const result = await setupDesignGovernance(targetSnapshotId);
@@ -317,17 +317,17 @@ export const PolicyStudio: React.FC = () => {
           parts.push(`${result.created.rules} new rule${result.created.rules > 1 ? 's' : ''}`);
         }
         if (parts.length === 0) {
-          setDesignGovMessage(`✅ Design governance already set up (idempotent: no changes needed)`);
+          setRuntimePackMessage(`✅ Runtime starter pack already set up (idempotent: no changes needed)`);
         } else {
-          setDesignGovMessage(`✅ ${result.message}`);
+          setRuntimePackMessage(`✅ ${result.message}`);
         }
         await reloadData(); // Reload to show new subtask types and rules
-        setTimeout(() => setDesignGovMessage(null), 7000); // Longer timeout for idempotency message
+        setTimeout(() => setRuntimePackMessage(null), 7000); // Longer timeout for idempotency message
       } else {
-        setDesignGovMessage(`❌ ${result.message}`);
+        setRuntimePackMessage(`❌ ${result.message}`);
       }
     } catch (error: any) {
-      setDesignGovMessage(`❌ Error: ${error.message || String(error)}`);
+      setRuntimePackMessage(`❌ Error: ${error.message || String(error)}`);
     } finally {
       setSettingUpDesignGov(false);
     }
@@ -342,7 +342,7 @@ export const PolicyStudio: React.FC = () => {
     
     setNewFact({
       snapshotId: defaultSnapshotId,
-      namespace: 'hotel', // Default namespace (will be trimmed on save)
+      namespace: 'seedcore', // Default namespace (will be trimmed on save)
       subject: '',
       predicate: '',
       object: '{}',
@@ -400,7 +400,7 @@ export const PolicyStudio: React.FC = () => {
 
       setNewFact({
         snapshotId: selectedSnapshot?.id || null,
-        namespace: (generatedFact.namespace || 'hotel').trim(), // Normalize namespace (trim spaces)
+        namespace: (generatedFact.namespace || 'seedcore').trim(), // Normalize namespace (trim spaces)
         subject: generatedFact.subject,
         predicate: generatedFact.predicate,
         object: JSON.stringify(generatedFact.object, null, 2),
@@ -421,7 +421,7 @@ export const PolicyStudio: React.FC = () => {
 
   const handleCreateFact = async () => {
     // Normalize namespace: trim and validate (prevent "ghost namespaces")
-    const normalizedNamespace = (newFact.namespace || 'hotel').trim();
+    const normalizedNamespace = (newFact.namespace || 'seedcore').trim();
     if (!normalizedNamespace || normalizedNamespace.length === 0) {
       setFactMessage('❌ Namespace cannot be empty');
       return;
@@ -913,7 +913,7 @@ export const PolicyStudio: React.FC = () => {
                   type="text"
                   value={newSnapshotVersion}
                   onChange={(e) => setNewSnapshotVersion(e.target.value)}
-                  placeholder="e.g., hotel-2030-v1.0.1"
+                  placeholder="e.g., runtime-baseline-v1.0.1"
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
               </div>
@@ -1051,16 +1051,16 @@ export const PolicyStudio: React.FC = () => {
                   <textarea
                     value={factPrompt}
                     onChange={(e) => setFactPrompt(e.target.value)}
-                    placeholder="e.g., A delivery robot on floors 1-10 that works from 8am to 10pm with logistics skills"
+                    placeholder="e.g., A robotic handler that can move sealed lots from VAULT to TRANSFER with dual-approval gating"
                     rows={6}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   />
                   <p className="mt-1 text-xs text-gray-500">
                     Examples:
-                    <br />• "A cleaning robot on floor 1-10 that works 8am to 10pm"
-                    <br />• "Room 1208 has HVAC, lighting, and privacy glass systems"
-                    <br />• "External police service for emergency response, contact 911"
-                    <br />• "A 3D printer in the workshop that can fabricate parts"
+                    <br />• "A seal scanner that validates serialized seals with 0.95 confidence"
+                    <br />• "The vault door controller keeps the door open for at most 12 seconds"
+                    <br />• "The quarantine bay isolates route-drift incidents"
+                    <br />• "High-value release requires dual approval and playback evidence"
                   </p>
                 </div>
 
@@ -1110,10 +1110,10 @@ export const PolicyStudio: React.FC = () => {
                     // Final normalization on blur (prevent "ghost namespaces")
                     const normalized = e.target.value.trim();
                     if (normalized !== e.target.value) {
-                      setNewFact({ ...newFact, namespace: normalized || 'hotel' });
+                      setNewFact({ ...newFact, namespace: normalized || 'seedcore' });
                     }
                   }}
-                  placeholder="e.g., hotel"
+                  placeholder="e.g., seedcore"
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
                 <p className="mt-1 text-xs text-gray-500">
@@ -1129,11 +1129,11 @@ export const PolicyStudio: React.FC = () => {
                   type="text"
                   value={newFact.subject}
                   onChange={(e) => setNewFact({ ...newFact, subject: e.target.value })}
-                  placeholder="e.g., unit:robot_02"
+                  placeholder="e.g., system:robotic_handler"
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
                 <p className="mt-1 text-xs text-gray-500">
-                  Subject identifier (e.g., unit:robot_01, room:1208, guest:john_doe)
+                  Subject identifier (e.g., system:robotic_handler, zone:VAULT, policy:high_value_release)
                 </p>
               </div>
 
@@ -1388,15 +1388,15 @@ export const PolicyStudio: React.FC = () => {
                   <textarea
                     value={rulePrompt}
                     onChange={(e) => setRulePrompt(e.target.value)}
-                    placeholder="e.g., If emergency keywords and HVAC issues are detected with high confidence, isolate the room HVAC, dispatch inspection robot, notify supervisor, and prepare guest relocation."
+                    placeholder="e.g., If a high-value release is requested without verified identity, lock the vault, dispatch operator review, and notify the control plane."
                     rows={6}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   />
                   <p className="mt-1 text-xs text-gray-500">
                     Examples:
-                    <br />• "If temperature is above 28 degrees in a room, order emergency cooling"
-                    <br />• "When VIP guest detected and temp over 25, cool the room"
-                    <br />• "If smoke detected and confidence high, activate emergency protocol and contact fire department"
+                    <br />• "If seal integrity drops below 0.95, quarantine the lot and capture playback evidence"
+                    <br />• "When route drift exceeds 0.5 in transfer, lock the corridor and notify operators"
+                    <br />• "If a high-value release is requested, require dual approval and release-window authorization"
                   </p>
                 </div>
 
@@ -1686,14 +1686,14 @@ export const PolicyStudio: React.FC = () => {
         </div>
       )}
 
-      {/* Design Governance Setup Message */}
-      {designGovMessage && (
+      {/* Runtime Starter Pack Message */}
+      {runtimePackMessage && (
         <div className={`mb-4 p-4 rounded-lg ${
-          designGovMessage.startsWith('✅') 
+          runtimePackMessage.startsWith('✅') 
             ? 'bg-green-50 border border-green-200 text-green-800' 
             : 'bg-red-50 border border-red-200 text-red-800'
         }`}>
-          <p className="text-sm">{designGovMessage}</p>
+          <p className="text-sm">{runtimePackMessage}</p>
         </div>
       )}
 
@@ -1760,17 +1760,17 @@ export const PolicyStudio: React.FC = () => {
               )}
             </div>
             <div>
-              <h3 className="font-semibold text-gray-900">Setup Design Governance</h3>
+              <h3 className="font-semibold text-gray-900">Setup Runtime Starter Pack</h3>
               <p className="text-sm text-gray-500 mt-1">
-                {settingUpDesignGov ? 'Setting up...' : 'Register subtask types & rules (idempotent)'}
+                {settingUpDesignGov ? 'Setting up...' : 'Register starter subtasks and rules (idempotent)'}
               </p>
-              {designGovMessage && (
+              {runtimePackMessage && (
                 <p className={`text-xs mt-1 ${
-                  designGovMessage.startsWith('✅') ? 'text-green-600' : 
-                  designGovMessage.startsWith('❌') ? 'text-red-600' : 
+                  runtimePackMessage.startsWith('✅') ? 'text-green-600' : 
+                  runtimePackMessage.startsWith('❌') ? 'text-red-600' : 
                   'text-gray-600'
                 }`}>
-                  {designGovMessage}
+                  {runtimePackMessage}
                 </p>
               )}
             </div>

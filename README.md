@@ -1,20 +1,71 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# SeedCore Runtime Simulator
 
-# Run and deploy your AI Studio app
+This project is a local simulator for the SeedCore product definition: a zero-trust runtime that governs AI-advised actions, Governed Agents, actuator endpoints, operator approvals, and replayable custody state.
 
-This contains everything you need to run your app locally.
+The simulator focuses on:
 
-View your app in AI Studio: https://ai.studio/apps/drive/1QLz3pxFjIqmdduqLaCq9rT32qXtlRn0v
+- deny-by-default policy evaluation before release or movement
+- Governed Agent and actuator orchestration across runtime zones
+- custody memory, playback evidence, and temporal facts
+- promotion, validation, canary deployment, and rollback workflows
+- scenario generation for ingress, vault, transfer, quarantine, and infrastructure events
+
+## Runtime Model
+
+The current baseline scenario models four operational zones:
+
+- `INGRESS` for source claims, scans, telemetry, and intake events
+- `VAULT` for sealed inventory, release windows, and dual approval
+- `TRANSFER` for robotic handoff and controlled movement
+- `QUARANTINE` for anomaly containment and exception recovery
 
 ## Run Locally
 
-**Prerequisites:**  Node.js
+Prerequisites:
 
+- Node.js 20+
+- optional PostgreSQL access through the local DB proxy
+- optional Gemini API key for AI-assisted seed generation and authoring
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+Install dependencies:
+
+```bash
+npm install
+```
+
+Run the app:
+
+```bash
+npm run dev
+```
+
+Run the DB proxy alongside the app:
+
+```bash
+npm run dev:all
+```
+
+If you use Gemini-backed features, set one of these in your environment:
+
+- `GEMINI_API_KEY`
+- `VITE_GEMINI_API_KEY`
+- `API_KEY`
+
+The database proxy URL defaults to `http://localhost:3011`.
+
+## Main Surfaces
+
+- `Initialization`: bootstrap the governed runtime baseline
+- `Knowledge Graph`: inspect facts, zones, systems, and custody relationships
+- `Unified Memory`: inspect event, knowledge, and playback memory
+- `Mission Seeds`: generate governed requests and runtime incident scenarios
+- `Policy Studio`: author facts and rules for PKG snapshots
+- `Simulator`: dry-run tags, signals, and emissions before deployment
+- `Governance Cockpit`: monitor perception, temporal validity, and digital twin output
+- `Control Plane`: evolve, validate, compile, and deploy snapshots
+- `Dashboard`: inspect runtime posture, deployments, and validation history
+
+## Notes
+
+- The repository still contains some older PKG or design-governance helper services. The active simulator path is being aligned around the SeedCore runtime model first.
+- Database-backed pages rely on the proxy in [`server/db-proxy.js`](/Users/ningli/project/pkg-simulator/server/db-proxy.js).

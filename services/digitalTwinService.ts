@@ -1,316 +1,148 @@
-/**
- * Digital Twin Simulation Service (Step 5)
- * 
- * Purpose: Pre-flight validation where a "Critic" Gemini instance validates rules
- * before they're promoted to active. Acts as a "Hardware Digital Twin" that checks
- * if rules will cause physical issues (e.g., "This will jam the printer").
- * 
- * Architecture:
- * - Mother (Rule Generator): Creates rego_bundle rules
- * - Critic (Digital Twin): Validates rules against hardware constraints
- * - Simulator: Marks snapshot as failed_validation if Critic rejects
- */
+import { GoogleGenAI } from '@google/genai';
+import { Rule, Snapshot } from '../types';
 
-import { GoogleGenAI } from "@google/genai";
-import { Rule, Snapshot } from "../types";
-
-const LLM_MODEL = process.env.LLM_MODEL || "gemini-2.0-flash";
+const LLM_MODEL = process.env.LLM_MODEL || 'gemini-2.0-flash';
 
 export interface DigitalTwinValidationResult {
   passed: boolean;
   issues: Array<{
-    severity: "critical" | "warning" | "info";
+    severity: 'critical' | 'warning' | 'info';
     ruleId?: string;
     ruleName?: string;
     issue: string;
     recommendation?: string;
   }>;
   hardwareConstraints: {
-    printer?: {
-      maxInkPerLayer: number;
-      maxLayers: number;
-      supportedFabricTypes: string[];
+    roboticHandler?: {
+      maxPayloadKg: number;
+      allowedZoneTransitions: string[];
+      requiresDualApproval: boolean;
     };
-    painter?: {
-      maxColors: number;
-      precision: "high" | "medium" | "low";
+    sealScanner?: {
+      minimumConfidence: number;
+      supportedSealClasses: string[];
+    };
+    vaultDoor?: {
+      maxOpenSeconds: number;
+      failMode: 'fail-secure' | 'fail-safe';
     };
   };
-  validationScore: number; // 0.0 - 1.0
+  validationScore: number;
 }
 
-/**
- * System prompt for the Environmental Critic (Digital Twin)
- * 
- * This prompt makes Gemini act as a hardware-aware validator that checks
- * if policy rules will cause physical problems in the hotel's equipment.
- */
-const CRITIC_SYSTEM_PROMPT = `You are the **Environmental Critic** - a Digital Twin of the hotel's physical hardware.
+const CRITIC_SYSTEM_PROMPT = `You are the SeedCore Digital Twin Critic for a zero-trust runtime.
 
-Your role is to validate policy rules against **real-world hardware constraints** before they are deployed.
+Your role is to validate runtime policy rules against operational constraints before deployment.
 
-## Hardware Constraints
+## Physical and Control Constraints
 
-### 3D Fabric Printer
-- Maximum ink per layer: 50 units
-- Maximum layers: 10
-- Supported fabric types: silk, cotton, polyester, leather
-- Cannot print on fabric already painted (must prepare first)
-- Requires fabric_prepare before fabric_print
+### Robotic Handler
+- Max payload: 25 kg
+- Allowed transitions: VAULT->TRANSFER, INGRESS->VAULT, TRANSFER->QUARANTINE
+- High-value lots require dual approval before movement
 
-### Robotic Painter
-- Maximum colors per design: 8
-- Precision levels: high (0.1mm), medium (0.5mm), low (1.0mm)
-- Cannot paint on wet fabric (must wait for print to dry)
-- Requires fabric_print before fabric_paint
+### Seal Scanner
+- Minimum confidence: 0.95 for high-value releases
+- Supported seal classes: tamper_evident, serialized, cold_chain
 
-### General Constraints
-- Ink consumption cannot exceed guest credits
-- Fabric must be prepared before printing
-- Preview confirmation required before printing
-- Billing must happen after resource usage
+### Vault Door Controller
+- Door may remain open for at most 12 seconds
+- Fail mode: fail-secure
 
-## Your Job
-
-Analyze policy rules and their emissions. Flag issues if:
-1. **Physical Impossibility**: Rule tries to print without preparing fabric
-2. **Resource Overuse**: Rule allows ink consumption > 50 units per layer
-3. **Sequence Violation**: Rule orders fabric_paint before fabric_print
-4. **Missing Prerequisites**: Rule emits fabric_print without design_preview GATE
-5. **Hardware Limits**: Rule exceeds printer/painter capabilities
-
-## Output Format
+## Flag issues when
+1. A rule allows movement without identity/provenance checks
+2. A rule routes a robotic handoff across an unsupported zone transition
+3. A rule permits release without dual approval for high-value assets
+4. A rule treats low-confidence seal scans as valid
+5. A rule omits playback or custody evidence for irreversible handoff
 
 Return JSON:
 {
   "passed": boolean,
-  "issues": [
-    {
-      "severity": "critical" | "warning" | "info",
-      "ruleId": "uuid",
-      "ruleName": "rule name",
-      "issue": "description of problem",
-      "recommendation": "how to fix"
-    }
-  ],
+  "issues": [{ "severity": "...", "ruleId": "...", "ruleName": "...", "issue": "...", "recommendation": "..." }],
   "hardwareConstraints": {
-    "printer": { "maxInkPerLayer": 50, "maxLayers": 10, "supportedFabricTypes": [...] },
-    "painter": { "maxColors": 8, "precision": "high" }
+    "roboticHandler": { "maxPayloadKg": 25, "allowedZoneTransitions": ["VAULT->TRANSFER"], "requiresDualApproval": true },
+    "sealScanner": { "minimumConfidence": 0.95, "supportedSealClasses": ["tamper_evident"] },
+    "vaultDoor": { "maxOpenSeconds": 12, "failMode": "fail-secure" }
   },
-  "validationScore": 0.0-1.0
-}
+  "validationScore": 0.0
+}`;
 
-Be strict but fair. Only mark as "critical" if the rule will definitely cause hardware failure or safety issues.`;
-
-/**
- * Validate rules using Gemini Critic (Digital Twin)
- */
 export async function validateRulesWithDigitalTwin(
   rules: Rule[],
   snapshot: Snapshot,
-  apiKey?: string
+  apiKey?: string,
 ): Promise<DigitalTwinValidationResult> {
   const key = apiKey || process.env.API_KEY || process.env.GEMINI_API_KEY;
   if (!key) {
-    throw new Error("No Gemini API key found. Set API_KEY or GEMINI_API_KEY environment variable");
+    throw new Error('No Gemini API key found. Set API_KEY or GEMINI_API_KEY.');
   }
 
   const ai = new GoogleGenAI({ apiKey: key });
-
-  // Format rules for validation
-  const rulesSummary = rules.map(r => ({
-    id: r.id,
-    name: r.ruleName,
-    priority: r.priority,
-    conditions: r.conditions.map(c => ({
-      type: c.conditionType,
-      key: c.conditionKey,
-      operator: c.operator,
-      value: c.value,
+  const rulesSummary = rules.map((rule) => ({
+    id: rule.id,
+    name: rule.ruleName,
+    priority: rule.priority,
+    conditions: rule.conditions.map((condition) => ({
+      type: condition.conditionType,
+      key: condition.conditionKey,
+      operator: condition.operator,
+      value: condition.value,
     })),
-    emissions: r.emissions.map((e, idx) => ({
-      subtaskName: e.subtaskName,
-      relationshipType: e.relationshipType,
-      params: e.params,
-      position: (e as any).position ?? idx, // Use position if available, otherwise use index
+    emissions: rule.emissions.map((emission) => ({
+      subtaskName: emission.subtaskName,
+      relationshipType: emission.relationshipType,
+      params: emission.params,
     })),
   }));
 
-  const prompt = `
-Analyze these policy rules for hardware compatibility:
-
-Snapshot: ${snapshot.version} (${snapshot.env})
-Rules: ${JSON.stringify(rulesSummary, null, 2)}
-
-Check each rule against hardware constraints. Look for:
-1. Physical impossibilities (e.g., printing without preparation)
-2. Resource overuse (ink > 50 units/layer)
-3. Sequence violations (painting before printing)
-4. Missing prerequisites (no preview GATE before print)
-5. Hardware limit violations (colors > 8, unsupported fabrics)
-
-Return your analysis in the JSON format specified.
-`;
-
-  try {
-    const response = await ai.models.generateContent({
-      model: LLM_MODEL,
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      config: {
-        systemInstruction: CRITIC_SYSTEM_PROMPT,
-        temperature: 0.3, // Lower temperature for more consistent validation
-        responseMimeType: "application/json",
+  const response = await ai.models.generateContent({
+    model: LLM_MODEL,
+    contents: [
+      {
+        role: 'user',
+        parts: [
+          {
+            text: `Validate these runtime policy rules for snapshot ${snapshot.version} (${snapshot.env}):\n${JSON.stringify(
+              rulesSummary,
+              null,
+              2,
+            )}`,
+          },
+        ],
       },
-    });
-
-    // FIX: Access text properly - handle potential SDK version differences
-    // Some SDK versions may have response.response.text() as a method
-    // Others may have response.text as a getter property
-    let resultText: string | undefined;
-    try {
-      // Try direct property access first (matches current SDK types)
-      resultText = response.text;
-      
-      // If that doesn't work, try nested response pattern (for compatibility with different SDK versions)
-      if (!resultText && (response as any).response) {
-        const nestedResponse = (response as any).response;
-        const nestedText = typeof nestedResponse.text === 'function' 
-          ? nestedResponse.text() 
-          : nestedResponse.text;
-        if (nestedText) {
-          resultText = nestedText;
-        }
-      }
-    } catch (error) {
-      console.error("Error accessing response text:", error);
-      throw new Error(`Failed to extract text from API response: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    
-    if (!resultText) {
-      console.error("Digital Twin API response structure:", {
-        hasText: !!response.text,
-        responseKeys: Object.keys(response),
-        responseType: typeof response,
-        responseStructure: JSON.stringify(response, null, 2).substring(0, 500),
-      });
-      throw new Error("No response text from Gemini API - response.text is empty or undefined");
-    }
-    
-    // Ensure we have a string before parsing
-    const textString = typeof resultText === 'string' ? resultText : String(resultText);
-    if (!textString || textString.trim().length === 0) {
-      throw new Error("Response text is empty after conversion to string");
-    }
-    
-    const result = JSON.parse(textString) as DigitalTwinValidationResult;
-
-    // Validate result structure
-    if (typeof result.passed !== "boolean") {
-      throw new Error("Invalid validation result: missing 'passed' field");
-    }
-
-    // Ensure all required fields exist
-    return {
-      passed: result.passed,
-      issues: result.issues || [],
-      hardwareConstraints: result.hardwareConstraints || {
-        printer: { maxInkPerLayer: 50, maxLayers: 10, supportedFabricTypes: [] },
-        painter: { maxColors: 8, precision: "high" },
-      },
-      validationScore: result.validationScore ?? (result.passed ? 1.0 : 0.0),
-    };
-  } catch (error) {
-    console.error("Digital Twin validation error:", error);
-    // Return safe failure result
-    return {
-      passed: false,
-      issues: [
-        {
-          severity: "critical",
-          issue: `Validation error: ${error instanceof Error ? error.message : String(error)}`,
-          recommendation: "Review rule structure and try again",
-        },
-      ],
-      hardwareConstraints: {
-        printer: { maxInkPerLayer: 50, maxLayers: 10, supportedFabricTypes: [] },
-        painter: { maxColors: 8, precision: "high" },
-      },
-      validationScore: 0.0,
-    };
-  }
-}
-
-/**
- * Run pre-flight validation for a snapshot
- * This is called before promoting a snapshot to active
- */
-export async function runPreFlightValidation(
-  snapshotId: number,
-  rules: Rule[],
-  snapshot: Snapshot,
-  dbProxyUrl: string = "http://localhost:3011",
-  apiKey?: string
-): Promise<{
-  validationRunId: number;
-  result: DigitalTwinValidationResult;
-}> {
-  // Start validation run
-  const startResponse = await fetch(`${dbProxyUrl}/api/validation-runs/start`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ snapshotId }),
+    ],
+    config: {
+      systemInstruction: CRITIC_SYSTEM_PROMPT,
+      temperature: 0.2,
+      responseMimeType: 'application/json',
+    },
   });
 
-  if (!startResponse.ok) {
-    throw new Error(`Failed to start validation run: ${startResponse.statusText}`);
+  const text = response.text;
+  if (!text) {
+    throw new Error('No response text from Gemini API.');
   }
 
-  const { id: validationRunId } = await startResponse.json();
-
-  try {
-    // Run Digital Twin validation
-    const validationResult = await validateRulesWithDigitalTwin(rules, snapshot, apiKey);
-
-    // Finish validation run
-    const finishResponse = await fetch(`${dbProxyUrl}/api/validation-runs/finish`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        id: validationRunId,
-        success: validationResult.passed,
-        report: {
-          validationType: "digital_twin",
-          score: validationResult.validationScore,
-          issues: validationResult.issues,
-          hardwareConstraints: validationResult.hardwareConstraints,
-          timestamp: new Date().toISOString(),
-        },
-      }),
-    });
-
-    if (!finishResponse.ok) {
-      throw new Error(`Failed to finish validation run: ${finishResponse.statusText}`);
-    }
-
-    return {
-      validationRunId,
-      result: validationResult,
-    };
-  } catch (error) {
-    // Mark validation as failed
-    await fetch(`${dbProxyUrl}/api/validation-runs/finish`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        id: validationRunId,
-        success: false,
-        report: {
-          error: error instanceof Error ? error.message : String(error),
-          timestamp: new Date().toISOString(),
-        },
-      }),
-    });
-
-    throw error;
-  }
+  const parsed = JSON.parse(text) as DigitalTwinValidationResult;
+  return {
+    passed: parsed.passed,
+    issues: parsed.issues || [],
+    hardwareConstraints: parsed.hardwareConstraints || {
+      roboticHandler: {
+        maxPayloadKg: 25,
+        allowedZoneTransitions: ['VAULT->TRANSFER', 'INGRESS->VAULT', 'TRANSFER->QUARANTINE'],
+        requiresDualApproval: true,
+      },
+      sealScanner: {
+        minimumConfidence: 0.95,
+        supportedSealClasses: ['tamper_evident', 'serialized', 'cold_chain'],
+      },
+      vaultDoor: {
+        maxOpenSeconds: 12,
+        failMode: 'fail-secure',
+      },
+    },
+    validationScore: parsed.validationScore ?? (parsed.passed ? 1 : 0),
+  };
 }

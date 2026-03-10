@@ -1,13 +1,13 @@
 /**
  * Temporal Policy Service (Step 6)
  * 
- * Purpose: Enable time-aware policies using Migration 016 temporal facts.
- * Rules can leverage valid_from/valid_to fields to create "Stay-Aware" policies
- * that understand the guest's journey timeline.
+ * Purpose: Enable time-aware policies using temporal facts.
+ * Rules can leverage valid_from/valid_to fields to create release-window-aware
+ * and custody-aware policies for the governed runtime.
  * 
  * Architecture:
  * - Temporal Facts: Facts with valid_from/valid_to windows
- * - Temporal Fixtures: Mock scenarios for testing (e.g., "guest checks out in 30 minutes")
+ * - Temporal Fixtures: Mock scenarios for testing release windows and quarantines
  * - Time-Aware Evaluation: Policy evaluation considers current time and fact validity windows
  */
 
@@ -23,7 +23,7 @@ export interface TemporalFixture {
     object: any;
     validFrom: string; // ISO timestamp
     validTo?: string; // ISO timestamp (null = indefinite)
-    namespace?: string; // Optional namespace (defaults to "hotel" if not specified)
+    namespace?: string; // Optional namespace (defaults to "seedcore" if not specified)
   }>;
   expectedBehavior: string; // Description of what should happen
 }
@@ -36,60 +36,60 @@ export interface TemporalEvaluationContext {
 }
 
 /**
- * Example temporal fixtures for testing stay-aware policies
+ * Example temporal fixtures for testing release-window-aware policies
  */
 export const TEMPORAL_FIXTURES: TemporalFixture[] = [
   {
-    name: "guest_checkout_soon",
-    description: "Guest checks out in 30 minutes - should restrict long-running operations",
+    name: "vault_release_window_open",
+    description: "A vault release is valid for the next 15 minutes.",
     currentTime: new Date().toISOString(),
     facts: [
       {
-        subject: "guest:123",
-        predicate: "checkout_time", // Will be matched as hotel:checkout_time (default namespace)
-        object: { timestamp: new Date(Date.now() + 30 * 60 * 1000).toISOString() },
+        subject: "policy:high_value_release",
+        predicate: "release_window",
+        object: { timestamp: new Date(Date.now() + 15 * 60 * 1000).toISOString() },
+        validFrom: new Date().toISOString(),
+        validTo: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+      },
+      {
+        subject: "asset:lot_42",
+        predicate: "in_zone",
+        object: { zone: "VAULT" },
+        validFrom: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+        validTo: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+      },
+    ],
+    expectedBehavior: "Release can proceed if identity and approval checks pass.",
+  },
+  {
+    name: "transfer_route_drift_active",
+    description: "A transfer route anomaly is active during movement.",
+    currentTime: new Date().toISOString(),
+    facts: [
+      {
+        subject: "transfer:route_alpha",
+        predicate: "route_drift",
+        object: { score: 0.8 },
         validFrom: new Date().toISOString(),
         validTo: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
       },
-      {
-        subject: "guest:123",
-        predicate: "room",
-        object: { roomNumber: "301" },
-        validFrom: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
-        validTo: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
-      },
     ],
-    expectedBehavior: "Design printing should be blocked or expedited (no long operations)",
+    expectedBehavior: "Transfer should be blocked and asset moved to quarantine.",
   },
   {
-    name: "guest_extended_stay",
-    description: "Guest has extended stay - can allow complex designs",
+    name: "expired_release_window",
+    description: "A release window has expired and must deny movement.",
     currentTime: new Date().toISOString(),
     facts: [
       {
-        subject: "guest:456",
-        predicate: "checkout_time",
-        object: { timestamp: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString() },
-        validFrom: new Date().toISOString(),
-        validTo: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-      },
-    ],
-    expectedBehavior: "Complex designs allowed (sufficient time for completion)",
-  },
-  {
-    name: "guest_checked_out",
-    description: "Guest has already checked out - all operations blocked",
-    currentTime: new Date().toISOString(),
-    facts: [
-      {
-        subject: "guest:789",
-        predicate: "checkout_time",
+        subject: "policy:high_value_release",
+        predicate: "release_window",
         object: { timestamp: new Date(Date.now() - 60 * 60 * 1000).toISOString() },
         validFrom: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
         validTo: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
       },
     ],
-    expectedBehavior: "All design operations should be blocked",
+    expectedBehavior: "All release operations should be blocked",
   },
 ];
 
@@ -139,16 +139,16 @@ export function getActiveFactsAtTime(facts: Fact[], currentTime: string): Fact[]
  * Parse condition key to extract namespace and predicate
  * 
  * SeedCore Master Class: Namespace-aware fact matching prevents collisions
- * between different systems (hotel vs gym vs spa, etc.)
+ * between different systems (seedcore vs external partner, etc.)
  * 
  * Supports formats:
- * - "namespace:predicate" (e.g., "hotel:checkout_time") - Recommended
- * - "predicate" (backward compatibility, defaults to "hotel" namespace)
+ * - "namespace:predicate" (e.g., "seedcore:release_window") - Recommended
+ * - "predicate" (backward compatibility, defaults to "seedcore" namespace)
  * 
  * Examples:
- * - "hotel:checkout_time" → matches facts with namespace="hotel", predicate="checkout_time"
- * - "gym:checkout_time" → matches facts with namespace="gym", predicate="checkout_time"
- * - "checkout_time" → matches facts with namespace="hotel", predicate="checkout_time" (default)
+ * - "seedcore:release_window" → matches facts with namespace="seedcore", predicate="release_window"
+ * - "partner:release_window" → matches facts with namespace="partner", predicate="release_window"
+ * - "release_window" → matches facts with namespace="seedcore", predicate="release_window" (default)
  * 
  * This ensures rules don't accidentally collide with facts from other systems.
  */
@@ -157,14 +157,14 @@ function parseFactConditionKey(conditionKey: string): { namespace: string; predi
   if (parts.length === 2) {
     return { namespace: parts[0], predicate: parts[1] };
   }
-  // Backward compatibility: if no namespace specified, default to "hotel"
-  return { namespace: "hotel", predicate: conditionKey };
+  // Backward compatibility: if no namespace specified, default to "seedcore"
+  return { namespace: "seedcore", predicate: conditionKey };
 }
 
 /**
  * Find fact matching namespace and predicate
  * SeedCore Master Class: Ensures rules don't accidentally collide with facts from other systems
- * Example: hotel:checkout_time vs gym:checkout_time are distinct
+ * Example: seedcore:release_window vs partner:release_window are distinct
  */
 function findFactByNamespaceAndPredicate(
   facts: Fact[],
@@ -179,7 +179,7 @@ function findFactByNamespaceAndPredicate(
  * Considers fact validity windows when evaluating conditions
  * 
  * SeedCore Master Class: Namespace-aware fact matching prevents collisions
- * between different systems (hotel vs gym vs spa, etc.)
+ * between different systems (seedcore vs partner vs facility, etc.)
  */
 export function evaluateTemporalPolicy(
   rules: Rule[],
@@ -322,7 +322,7 @@ export async function testRuleWithTemporalFixtures(
 
   for (const fixture of fixtures) {
     // Convert fixture facts to Fact format
-    // Support namespace-aware fixtures (e.g., gym:checkout_time vs hotel:checkout_time)
+    // Support namespace-aware fixtures (e.g., partner:release_window vs seedcore:release_window)
     // Ensure governed facts have proper temporal validity (consistent with InitializationPage)
     const facts: Fact[] = fixture.facts.map((f) => {
       // Generate text representation from structured triple (required in new schema)
@@ -336,7 +336,7 @@ export async function testRuleWithTemporalFixtures(
         id: `fixture-${fixture.name}-${f.subject}`,
         snapshotId: snapshot.id,
         text: factText, // Required field in new schema
-        namespace: f.namespace || "hotel", // Use fixture namespace or default to "hotel"
+        namespace: f.namespace || "seedcore", // Use fixture namespace or default to "seedcore"
         subject: f.subject,
         predicate: f.predicate,
         object: f.object,

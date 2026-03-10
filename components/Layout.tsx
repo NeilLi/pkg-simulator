@@ -54,8 +54,8 @@ export const Layout: React.FC<LayoutProps> = ({ children, activePage, onNavigate
             <Activity className="h-6 w-6 text-white" />
           </div>
           <div>
-            <h1 className="font-bold text-lg tracking-tight">PKG Manager</h1>
-            <p className="text-xs text-slate-400">v2.6 Enterprise</p>
+            <h1 className="font-bold text-lg tracking-tight">SeedCore Runtime</h1>
+            <p className="text-xs text-slate-400">Governed Execution Simulator</p>
           </div>
         </div>
 
@@ -98,8 +98,8 @@ export const Layout: React.FC<LayoutProps> = ({ children, activePage, onNavigate
               JS
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-white truncate">Jane Smith</p>
-              <p className="text-xs text-slate-400 truncate">Lead Engineer</p>
+              <p className="text-sm font-medium text-white truncate">Operations Console</p>
+              <p className="text-xs text-slate-400 truncate">Governed Runtime</p>
             </div>
           </div>
         </div>
@@ -114,7 +114,7 @@ export const Layout: React.FC<LayoutProps> = ({ children, activePage, onNavigate
             </h2>
             <div className="flex items-center space-x-4">
                <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                 System Operational
+                 Runtime Active
                </span>
                <span className="text-sm text-gray-500">Env: PROD</span>
             </div>

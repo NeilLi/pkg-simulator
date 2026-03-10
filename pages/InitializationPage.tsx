@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Sparkles, Loader2, AlertTriangle } from 'lucide-react';
-import { initializeHotelScenario } from '../services/initializationService';
+import { initializeGovernedRuntimeScenario } from '../services/initializationService';
 import { clearCache } from '../mockData';
 import { PkgEnv } from '../types';
 
@@ -25,7 +25,7 @@ export const InitializationPage: React.FC = () => {
     setInitMessage(null);
     try {
       // Only initialize for the selected environment (single environment support)
-      const result = await initializeHotelScenario(selectedEnv);
+      const result = await initializeGovernedRuntimeScenario(selectedEnv);
       if (result.success) {
         const envLabel = selectedEnv === PkgEnv.PROD ? 'production' : 
                         selectedEnv === PkgEnv.STAGING ? 'staging' : 'development';
@@ -57,9 +57,8 @@ export const InitializationPage: React.FC = () => {
           <div>
             <h2 className="text-lg font-semibold text-gray-900">System Initialization</h2>
             <p className="text-sm text-gray-500 mt-1">
-              Bootstrap the SeedCore-Native Hotel (2030+) baseline environment with service robots, 
-              smart rooms, 3D printers, wearable guest devices, digital concierges, human staff, 
-              and external city services.
+              Bootstrap the SeedCore governed runtime baseline with ingress, vault, transfer,
+              quarantine, and actuator-control surfaces aligned to the current product definition.
             </p>
             
             <div className="mt-4 p-4 bg-amber-50 border border-amber-200 rounded-lg">
@@ -68,9 +67,9 @@ export const InitializationPage: React.FC = () => {
                 <div className="text-sm text-amber-800">
                   <p className="font-semibold mb-1">Warning: Bootstrap Operation</p>
                   <p className="text-xs">
-                    This operation creates baseline snapshots, rules, and facts for a single environment (prod, staging, or dev). 
-                    The initialization is idempotent - running it multiple times will not create duplicates.
-                    To initialize multiple environments, run this operation separately for each environment.
+                    This operation creates the baseline snapshot, subtask library, policy rules, and
+                    governed facts for one environment at a time. If the baseline already exists for
+                    the selected environment, the initializer exits without duplicating it.
                   </p>
                 </div>
               </div>
@@ -111,7 +110,7 @@ export const InitializationPage: React.FC = () => {
               ) : (
                 <>
                   <Sparkles className="h-5 w-5" />
-                  <span>Initialize Hotel Scenario</span>
+                  <span>Initialize Runtime Baseline</span>
                 </>
               )}
             </button>
@@ -138,15 +137,15 @@ export const InitializationPage: React.FC = () => {
           </li>
           <li className="flex items-start">
             <span className="text-green-500 mr-2">✓</span>
-            <span><strong>Subtask Types:</strong> Service robot capabilities, smart room systems, 3D printer operations, etc.</span>
+            <span><strong>Subtask Types:</strong> Identity verification, release authorization, robotic handoff, playback capture, quarantine, and control-plane notifications</span>
           </li>
           <li className="flex items-start">
             <span className="text-green-500 mr-2">✓</span>
-            <span><strong>Policy Rules:</strong> Emergency protocols, HVAC management, external service integration, self-repair policies</span>
+            <span><strong>Policy Rules:</strong> Deny-by-default release gates, seal-integrity quarantine, dual approval, route drift containment, actuator routing, and playback archival</span>
           </li>
           <li className="flex items-start">
             <span className="text-green-500 mr-2">✓</span>
-            <span><strong>Temporal Facts:</strong> Plug-in unit registrations (zones, systems, building maps) with proper temporal validity (valid_from, valid_to), system access grants, persona preferences, and PKG governance fields (pkg_rule_id, pkg_provenance, validation_status) - all facts are active immediately and ready for rule matching</span>
+            <span><strong>Temporal Facts:</strong> Runtime zones, actuator systems, release policies, and custody constraints with temporal validity and PKG governance fields so rules become active immediately</span>
           </li>
           <li className="flex items-start">
             <span className="text-gray-400 mr-2">○</span>

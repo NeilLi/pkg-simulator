@@ -6,7 +6,7 @@ import {
 import { 
   ShieldCheck, Activity, Database, Server, Radio, CheckCircle2, 
   AlertTriangle, RefreshCw, Workflow, Layers, TrendingUp, 
-  FileText, Clock, Compass, Box, Shirt, Sparkles, Wind, DoorOpen, ArrowUpDown, Image
+  FileText, Clock, ScanLine, Archive, ArrowRightLeft, TriangleAlert, Lock, ArrowUpDown, Image
 } from 'lucide-react';
 import { 
   Snapshot, Rule, Fact, Deployment, ValidationRun, 
@@ -16,10 +16,10 @@ import { listSnapshots } from '../services/snapshotService';
 import { getRules, getFacts, getDeployments, getValidationRuns, getSubtaskTypes } from '../mockData';
 
 const ZONE_THEMES = {
-  JOURNEY: { name: "Journey Studio", icon: Compass, color: "#8b5cf6", bg: "bg-purple-50" }, // Royal
-  GIFT: { name: "Gift Forge", icon: Box, color: "#f59e0b", bg: "bg-amber-50" }, // Gold
-  WEAR: { name: "Fashion Lab", icon: Shirt, color: "#3b82f6", bg: "bg-blue-50" }, // Blue
-  KIDS: { name: "Magic Atelier", icon: Sparkles, color: "#f43f5e", bg: "bg-rose-50" }, // Rose
+  INGRESS: { name: 'Event Ingress', icon: ScanLine, color: '#0ea5e9', bg: 'bg-sky-50' },
+  VAULT: { name: 'Vault Control', icon: Archive, color: '#f59e0b', bg: 'bg-amber-50' },
+  TRANSFER: { name: 'Transfer Corridor', icon: ArrowRightLeft, color: '#6366f1', bg: 'bg-indigo-50' },
+  QUARANTINE: { name: 'Quarantine Bay', icon: TriangleAlert, color: '#f43f5e', bg: 'bg-rose-50' },
 };
 
 export const Dashboard: React.FC = () => {
@@ -72,9 +72,13 @@ export const Dashboard: React.FC = () => {
   // Zone Health Calculation
   const zoneStats = useMemo(() => {
     return Object.keys(ZONE_THEMES).map(zoneId => {
-      const zoneRules = snapshotData.rules.filter(r => r.ruleSource?.includes(zoneId));
-      const hasEmergency = snapshotData.facts.some(f => f.subject === `zone:${zoneId}` && f.tags?.includes('emergency'));
-      return { id: zoneId, ruleCount: zoneRules.length, status: hasEmergency ? 'ALERT' : 'STABLE' };
+      const zoneRules = snapshotData.rules.filter(
+        (rule) => rule.ruleSource?.toUpperCase().includes(zoneId) || rule.ruleName.toUpperCase().includes(zoneId),
+      );
+      const hasContainment = snapshotData.facts.some(
+        (fact) => fact.subject === `zone:${zoneId}` && fact.tags?.includes('quarantine'),
+      );
+      return { id: zoneId, ruleCount: zoneRules.length, status: hasContainment ? 'ALERT' : 'STABLE' };
     });
   }, [snapshotData]);
 
@@ -89,7 +93,7 @@ export const Dashboard: React.FC = () => {
             <Activity className="h-6 w-6" />
           </div>
           <div>
-            <h2 className="text-xl font-bold text-slate-900">Hotel 2030+ Observer</h2>
+            <h2 className="text-xl font-bold text-slate-900">Governed Runtime Observer</h2>
             <p className="text-sm text-slate-500 font-mono">Snapshot: {activeSnapshot?.version || 'N/A'}</p>
           </div>
         </div>
@@ -145,24 +149,24 @@ export const Dashboard: React.FC = () => {
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={[
                 { 
-                  subject: 'HVAC', 
+                  subject: 'IDENTITY', 
                   count: snapshotData.facts.filter(f => 
                     f.subject && f.predicate && f.object !== undefined && 
-                    f.subject.toLowerCase().includes('hvac')
+                    f.subject.toLowerCase().includes('identity')
                   ).length 
                 },
                 { 
-                  subject: 'ELEVATORS', 
+                  subject: 'SEALS', 
                   count: snapshotData.facts.filter(f => 
                     f.subject && f.predicate && f.object !== undefined && 
-                    f.subject.toLowerCase().includes('elevator')
+                    f.subject.toLowerCase().includes('seal')
                   ).length 
                 },
                 { 
-                  subject: 'ACCESS', 
+                  subject: 'ACTUATORS', 
                   count: snapshotData.facts.filter(f => 
                     f.subject && f.predicate && f.object !== undefined && 
-                    (f.subject.toLowerCase().includes('door') || f.subject.toLowerCase().includes('access'))
+                    (f.subject.toLowerCase().includes('robotic') || f.subject.toLowerCase().includes('door'))
                   ).length 
                 },
                 { 
@@ -199,8 +203,8 @@ export const Dashboard: React.FC = () => {
                     <div className="text-[10px] text-slate-400 mt-0.5">Executor: {st.defaultParams?.engine || 'native'}</div>
                   </div>
                   <div className="flex items-center gap-2">
-                    {st.name === 'generate_precision_mockups' && <Image className="h-4 w-4 text-indigo-500" />}
-                    {st.name.includes('hvac') && <Wind className="h-4 w-4 text-sky-500" />}
+                    {st.name.includes('capture') && <Image className="h-4 w-4 text-indigo-500" />}
+                    {st.name.includes('lock') && <Lock className="h-4 w-4 text-sky-500" />}
                   </div>
                 </div>
               ))

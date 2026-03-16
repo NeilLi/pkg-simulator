@@ -340,6 +340,133 @@ app.get('/api/subtask-types', async (req, res) => {
   }
 });
 
+// Cleanup deprecated preferred organs in active snapshots (idempotent)
+app.post('/api/admin/cleanup-preferred-organs', async (req, res) => {
+  const includeGuestOverlays = req.body?.includeGuestOverlays === true;
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const auditResult = await client.query(`
+      SELECT
+        st.snapshot_id,
+        st.name,
+        st.default_params #>> '{routing,preferred_organ}' AS preferred_organ
+      FROM pkg_subtask_types st
+      JOIN pkg_snapshots s ON s.id = st.snapshot_id
+      WHERE s.is_active = TRUE
+        AND st.default_params #>> '{routing,preferred_organ}' IS NOT NULL
+        AND st.default_params #>> '{routing,preferred_organ}'
+            NOT IN ('user_experience_organ','utility_organ','brain_foundry_organ','physical_actuation_organ')
+      ORDER BY st.snapshot_id, st.name
+    `);
+
+    const updatedSubtaskTypesResult = await client.query(`
+      WITH organ_map(old_org, new_org) AS (
+        VALUES
+          ('memory_organ', 'utility_organ'),
+          ('policy_organ', 'utility_organ')
+      )
+      UPDATE pkg_subtask_types st
+      SET default_params = jsonb_set(
+        COALESCE(st.default_params, '{}'::jsonb),
+        '{routing,preferred_organ}',
+        to_jsonb(organ_map.new_org),
+        true
+      )
+      FROM organ_map, pkg_snapshots s
+      WHERE s.is_active = TRUE
+        AND s.id = st.snapshot_id
+        AND st.default_params #>> '{routing,preferred_organ}' = organ_map.old_org
+      RETURNING
+        st.snapshot_id,
+        st.name,
+        st.default_params #>> '{routing,preferred_organ}' AS new_preferred_organ
+    `);
+
+    let guestCapabilitiesTableFound = false;
+    let updatedGuestCapabilitiesRows = [];
+    if (includeGuestOverlays) {
+      const tableCheck = await client.query(`
+        SELECT to_regclass('public.guest_capabilities') IS NOT NULL AS table_exists
+      `);
+      guestCapabilitiesTableFound = tableCheck.rows[0]?.table_exists === true;
+
+      if (guestCapabilitiesTableFound) {
+        const updatedGuestCapabilitiesResult = await client.query(`
+          WITH organ_map(old_org, new_org) AS (
+            VALUES
+              ('memory_organ', 'utility_organ'),
+              ('policy_organ', 'utility_organ')
+          )
+          UPDATE guest_capabilities gc
+          SET custom_params = jsonb_set(
+            COALESCE(gc.custom_params, '{}'::jsonb),
+            '{routing,preferred_organ}',
+            to_jsonb(organ_map.new_org),
+            true
+          )
+          FROM organ_map
+          WHERE gc.custom_params #>> '{routing,preferred_organ}' = organ_map.old_org
+          RETURNING
+            gc.id,
+            gc.guest_id,
+            gc.persona_name,
+            gc.custom_params #>> '{routing,preferred_organ}' AS new_preferred_organ
+        `);
+        updatedGuestCapabilitiesRows = updatedGuestCapabilitiesResult.rows;
+      }
+    }
+
+    const reverifyResult = await client.query(`
+      SELECT
+        st.snapshot_id,
+        st.name,
+        st.default_params #>> '{routing,preferred_organ}' AS preferred_organ
+      FROM pkg_subtask_types st
+      JOIN pkg_snapshots s ON s.id = st.snapshot_id
+      WHERE s.is_active = TRUE
+        AND st.default_params #>> '{routing,preferred_organ}' IN ('memory_organ','policy_organ')
+      ORDER BY st.snapshot_id, st.name
+    `);
+
+    await client.query('COMMIT');
+
+    res.json({
+      includeGuestOverlays,
+      audit: auditResult.rows.map((row) => ({
+        snapshotId: row.snapshot_id,
+        name: row.name,
+        preferredOrgan: row.preferred_organ,
+      })),
+      updatedSubtaskTypes: updatedSubtaskTypesResult.rows.map((row) => ({
+        snapshotId: row.snapshot_id,
+        name: row.name,
+        newPreferredOrgan: row.new_preferred_organ,
+      })),
+      updatedGuestCapabilities: updatedGuestCapabilitiesRows.map((row) => ({
+        id: row.id,
+        guestId: row.guest_id ?? null,
+        personaName: row.persona_name ?? null,
+        newPreferredOrgan: row.new_preferred_organ,
+      })),
+      guestCapabilitiesTableFound,
+      remainingDeprecatedInActiveSnapshots: reverifyResult.rows.map((row) => ({
+        snapshotId: row.snapshot_id,
+        name: row.name,
+        preferredOrgan: row.preferred_organ,
+      })),
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Error cleaning preferred organs:', error);
+    res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
 // Get rules with conditions and emissions
 app.get('/api/rules', async (req, res) => {
   try {
@@ -2995,6 +3122,7 @@ app.listen(PORT, () => {
   console.log(`   GET    /api/validation-runs`);
   console.log(`   POST   /api/validation-runs/start`);
   console.log(`   POST   /api/validation-runs/finish`);
+  console.log(`   POST   /api/admin/cleanup-preferred-organs`);
   console.log(`   POST   /api/memory/append`);
   console.log(`   POST   /api/memory/promote`);
   console.log(`   POST   /api/policy/evaluate`);

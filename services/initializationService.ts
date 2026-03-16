@@ -23,6 +23,32 @@ interface CreatedRule {
   name: string;
 }
 
+export interface PreferredOrganCleanupResult {
+  includeGuestOverlays: boolean;
+  audit: Array<{
+    snapshotId: number;
+    name: string;
+    preferredOrgan: string;
+  }>;
+  updatedSubtaskTypes: Array<{
+    snapshotId: number;
+    name: string;
+    newPreferredOrgan: string;
+  }>;
+  updatedGuestCapabilities: Array<{
+    id: number;
+    guestId: number | null;
+    personaName: string | null;
+    newPreferredOrgan: string;
+  }>;
+  guestCapabilitiesTableFound: boolean;
+  remainingDeprecatedInActiveSnapshots: Array<{
+    snapshotId: number;
+    name: string;
+    preferredOrgan: string;
+  }>;
+}
+
 async function fetchJson(url: string, options?: RequestInit) {
   const response = await fetch(url, options);
   if (!response.ok) {
@@ -92,7 +118,7 @@ export async function initializeGovernedRuntimeScenario(env: PkgEnv = PkgEnv.PRO
         defaultParams: {
           zone: null,
           requiredClaims: ['actor', 'asset', 'source', 'seal'],
-          routing: { preferred_organ: 'policy_organ' },
+          routing: { preferred_organ: 'utility_organ' },
         },
       },
       {
@@ -100,7 +126,7 @@ export async function initializeGovernedRuntimeScenario(env: PkgEnv = PkgEnv.PRO
         defaultParams: {
           zone: null,
           dualApprovalRequired: true,
-          routing: { preferred_organ: 'policy_organ' },
+          routing: { preferred_organ: 'utility_organ' },
         },
       },
       {
@@ -133,7 +159,7 @@ export async function initializeGovernedRuntimeScenario(env: PkgEnv = PkgEnv.PRO
         defaultParams: {
           zone: null,
           evidenceClass: 'custody_transition',
-          routing: { preferred_organ: 'memory_organ' },
+          routing: { preferred_organ: 'utility_organ' },
         },
       },
       {
@@ -149,7 +175,7 @@ export async function initializeGovernedRuntimeScenario(env: PkgEnv = PkgEnv.PRO
         defaultParams: {
           memory_tier: 'event_working',
           operation: 'append',
-          routing: { preferred_organ: 'memory_organ' },
+          routing: { preferred_organ: 'utility_organ' },
         },
       },
       {
@@ -476,3 +502,15 @@ export async function initializeGovernedRuntimeScenario(env: PkgEnv = PkgEnv.PRO
 }
 
 export const initializeHotelScenario = initializeGovernedRuntimeScenario;
+
+export async function cleanupPreferredOrgans(
+  options: { includeGuestOverlays?: boolean } = {}
+): Promise<PreferredOrganCleanupResult> {
+  return fetchJson(`${API_BASE_URL}/api/admin/cleanup-preferred-organs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      includeGuestOverlays: options.includeGuestOverlays === true,
+    }),
+  });
+}

@@ -101,3 +101,6 @@ All enums match the database enum types:
 - PKG Tables Reference: `deploy/migrations/PKG_TABLES_REFERENCE.md`
 - PKG Manager: `src/seedcore/ops/pkg/manager.py`
 - PKG DAO: `src/seedcore/ops/pkg/dao.py`
+- Phase 0 runtime scope: `docs/SEEDCORE_PHASE0_SCOPE.md`
+- Phase 1 schema proposal: `docs/SEEDCORE_PHASE1_SCHEMA.md`
+- Proposed simulator-side contract model: `seedcorePolicyDomain.ts`

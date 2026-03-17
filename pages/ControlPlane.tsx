@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 
 import { getSnapshots, getRules, getSubtaskTypes, getDeployments, clearCache } from '../mockData';
-import { EvolutionProposal, AgentLog, Snapshot, ValidationRun, Rule, PkgEnv, SubtaskType, Deployment, DeploymentTarget } from '../types';
+import { EvolutionProposal, AgentLog, Snapshot, ValidationRun, Rule, PkgEnv, SubtaskType, Deployment, DeploymentTarget, UnifiedMemoryItem } from '../types';
 
 import {
   proposeEvolution,
@@ -21,7 +21,32 @@ import { validateRulesWithDigitalTwin } from '../services/digitalTwinService';
 import { createSnapshot } from '../services/snapshotService';
 import { createRule } from '../services/ruleService';
 import { createOrUpdateDeployment, rollbackDeploymentLane, getRolloutEvents } from '../services/deploymentService';
-import { seedcoreService } from '../services/seedcoreService';
+import { seedcoreService, TrackingEvent } from '../services/seedcoreService';
+import { fetchUnifiedMemory } from '../services/database';
+
+const APP_TRACKING_ID = 'pkg-simulator';
+const APP_TRACKING_SUBJECT_TYPE = 'application';
+const EFFECTIVE_TRACKING_EVENT_TYPES = [
+  'policy_decision_recorded',
+  'runtime_incident_detected',
+  'policy_implementation_reported',
+] as const;
+
+const SEVERITY_SCORES: Record<string, number> = {
+  critical: 4,
+  high: 3,
+  error: 3,
+  warning: 2,
+  warn: 2,
+  escalated: 2,
+  rejected: 2,
+  denied: 2,
+  blocked: 2,
+  normal: 1,
+  info: 0,
+  ok: 0,
+  improved: 0,
+};
 
 // ---------- helpers ----------
 const mkId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -54,6 +79,169 @@ function pickBaseSnapshot(snaps: Snapshot[], baseId?: number | null) {
   }
   // Prefer active PROD
   return snaps.find(s => s.env === PkgEnv.PROD && s.isActive) || snaps[0] || null;
+}
+
+function matchesZoneMemory(memory: UnifiedMemoryItem, zone: string) {
+  const upperZone = zone.toUpperCase();
+  const category = (memory.category || '').toUpperCase();
+  const metadataZone = String(memory.metadata?.zone || memory.metadata?.intent?.zone || '').toUpperCase();
+  return category.includes(upperZone) || metadataZone === upperZone;
+}
+
+function summarizeIncidentMemories(zone: string, memories: UnifiedMemoryItem[]) {
+  const incidents = memories.slice(0, 5);
+  const anomalyCounts = new Map<string, number>();
+
+  for (const memory of incidents) {
+    const anomaly = memory.metadata?.intent?.anomaly;
+    if (anomaly && anomaly !== 'none') {
+      anomalyCounts.set(anomaly, (anomalyCounts.get(anomaly) || 0) + 1);
+    }
+  }
+
+  const anomalySummary = Array.from(anomalyCounts.entries())
+    .map(([name, count]) => `${name}=${count}`)
+    .join(', ');
+
+  const incidentLines = incidents.map((memory, index) => {
+    const endpoint = memory.metadata?.intent?.endpoint || memory.metadata?.endpoint || 'unknown_endpoint';
+    const severity = memory.metadata?.intent?.severity || memory.metadata?.severity || 'unknown';
+    const content = safeQuote(memory.content || 'No incident details provided.', 160);
+    return `${index + 1}. endpoint=${endpoint}; severity=${severity}; detail=${content}`;
+  });
+
+  return [
+    `[Autonomous Incident Digest | Zone: ${zone}]`,
+    anomalySummary ? `Observed anomalies: ${anomalySummary}` : 'Observed anomalies: none classified yet',
+    'Recent infrastructure incidents:',
+    ...incidentLines,
+    'Requested policy evolution: tighten detection thresholds, auto-contain repeated anomalies, require operator review for critical endpoint instability, and preserve service continuity for healthy traffic.',
+  ].join('\n');
+}
+
+function zoneTokens(zone: string) {
+  return [
+    zone,
+    zone.toLowerCase(),
+    zone.toUpperCase(),
+    zone.replace(/_/g, ' '),
+    zone.toLowerCase().replace(/_/g, ' '),
+  ];
+}
+
+function eventContainsZoneValue(value: unknown, zone: string): boolean {
+  if (value == null) return false;
+  const haystack = typeof value === 'string' ? value : JSON.stringify(value);
+  const normalized = haystack.toLowerCase();
+  return zoneTokens(zone).some(token => normalized.includes(token.toLowerCase()));
+}
+
+function matchesZoneTrackingEvent(event: TrackingEvent, zone: string) {
+  if (eventContainsZoneValue(event.subject_type, zone)) return true;
+  if (eventContainsZoneValue(event.subject_id, zone)) return true;
+  if (eventContainsZoneValue(event.event_type, zone)) return true;
+
+  const payload = event.payload || {};
+  const candidateFields = [
+    payload.zone,
+    payload.zone_id,
+    payload.location,
+    payload.location_context,
+    payload.target,
+    payload.endpoint,
+    payload.intent?.zone,
+    payload.metadata?.zone,
+    payload.context?.zone,
+  ];
+
+  if (candidateFields.some(value => eventContainsZoneValue(value, zone))) {
+    return true;
+  }
+
+  return eventContainsZoneValue(payload, zone);
+}
+
+function isEffectiveTrackingEvent(event: TrackingEvent) {
+  return EFFECTIVE_TRACKING_EVENT_TYPES.includes(event.event_type as typeof EFFECTIVE_TRACKING_EVENT_TYPES[number]);
+}
+
+function isPolicyDenyEvent(event: TrackingEvent) {
+  const payload = event.payload || {};
+  const disposition = String(payload.disposition || payload.policy_decision?.disposition || '').toLowerCase();
+  const status = String(payload.status || payload.policy_decision?.status || '').toLowerCase();
+  const allowed = payload.allowed ?? payload.policy_decision?.allowed;
+  return event.event_type === 'policy_decision_recorded'
+    && (allowed === false || ['deny', 'denied', 'escalate', 'escalated', 'reject', 'rejected', 'blocked'].includes(disposition) || ['deny', 'denied', 'rejected', 'blocked', 'escalated'].includes(status));
+}
+
+function eventSeverityScore(event: TrackingEvent) {
+  const payload = event.payload || {};
+  const rawSeverity = String(
+    payload.severity ||
+    payload.priority ||
+    payload.status ||
+    payload.policy_decision?.status ||
+    ''
+  ).toLowerCase();
+  return SEVERITY_SCORES[rawSeverity] ?? 0;
+}
+
+function eventRepeatCount(event: TrackingEvent) {
+  const payload = event.payload || {};
+  const count = payload.count ?? payload.repeat_count ?? payload.metadata?.count ?? payload.metadata?.repeat_count;
+  return typeof count === 'number' && Number.isFinite(count) ? count : 1;
+}
+
+function rankTrackingEvents(events: TrackingEvent[]) {
+  return [...events].sort((a, b) => {
+    const denyDelta = Number(isPolicyDenyEvent(b)) - Number(isPolicyDenyEvent(a));
+    if (denyDelta !== 0) return denyDelta;
+
+    const severityDelta = eventSeverityScore(b) - eventSeverityScore(a);
+    if (severityDelta !== 0) return severityDelta;
+
+    const repeatDelta = eventRepeatCount(b) - eventRepeatCount(a);
+    if (repeatDelta !== 0) return repeatDelta;
+
+    return new Date(b.captured_at).getTime() - new Date(a.captured_at).getTime();
+  });
+}
+
+function summarizeTrackingEvents(zone: string, events: TrackingEvent[]) {
+  const latestEvents = rankTrackingEvents(events).slice(0, 5);
+  const typeCounts = new Map<string, number>();
+
+  for (const event of latestEvents) {
+    typeCounts.set(event.event_type, (typeCounts.get(event.event_type) || 0) + 1);
+  }
+
+  const eventTypeSummary = Array.from(typeCounts.entries())
+    .map(([name, count]) => `${name}=${count}`)
+    .join(', ');
+
+  const eventLines = latestEvents.map((event, index) => {
+    const payload = event.payload || {};
+    const endpoint = payload.endpoint || payload.target || payload.location_context || payload.zone || 'unknown_endpoint';
+    const severity = payload.severity || payload.priority || payload.status || 'unknown';
+    const detailSource =
+      payload.summary ||
+      payload.message ||
+      payload.reason ||
+      payload.detail ||
+      payload.description ||
+      JSON.stringify(payload);
+    const detail = safeQuote(String(detailSource || 'No event details provided.'), 160);
+
+    return `${index + 1}. event_type=${event.event_type}; endpoint=${endpoint}; severity=${severity}; detail=${detail}`;
+  });
+
+  return [
+    `[SeedCore Tracking Event Digest | Zone: ${zone}]`,
+    eventTypeSummary ? `Observed event types: ${eventTypeSummary}` : 'Observed event types: none classified yet',
+    'Highest-priority effective tracking events:',
+    ...eventLines,
+    'Requested policy evolution: tighten detection thresholds, auto-contain repeated anomalies, require operator review for critical endpoint instability, and preserve service continuity for healthy traffic.',
+  ].join('\n');
 }
 
 export const ControlPlane: React.FC = () => {
@@ -117,6 +305,8 @@ export const ControlPlane: React.FC = () => {
   
   // Option to deploy an existing snapshot directly (for first-time initialization)
   const [selectedSnapshotForDeployment, setSelectedSnapshotForDeployment] = useState<number | null>(null);
+  const [isHydratingIntent, setIsHydratingIntent] = useState(false);
+  const autoIntentRef = useRef('');
 
   const addLog = (agent: AgentLog['agent'], message: string, level: AgentLog['level'] = 'INFO', pid?: string) => {
     const effectivePid = pid || pipelineIdRef.current;
@@ -130,6 +320,64 @@ export const ControlPlane: React.FC = () => {
       // Unified Memory Event (Tier A: event_working)
       // keep compat: AgentLog type doesn't have pipelineId, so we encode it in message or ignore
     }, ...prev.filter(x => x.id)]); // shallow stability
+  };
+
+  const hydrateIntentFromUnifiedMemory = async (zone: string) => {
+    const memory = await fetchUnifiedMemory(200);
+    const memoryMatches = memory.filter(item => item.memoryTier === 'event_working' && matchesZoneMemory(item, zone));
+
+    if (memoryMatches.length === 0) {
+      const fallback = `[SeedCore Tracking Event Digest | Zone: ${zone}]
+No recent effective tracking events were found for this zone.
+Requested policy evolution: keep current controls, but add log watchers, anomaly thresholds, and escalation hooks for future incidents.`;
+      autoIntentRef.current = fallback;
+      setIntent(fallback);
+      addLog('EVOLUTION', `No recent incidents found for zone=${zone}; inserted monitoring-oriented fallback intent.`, 'WARN');
+      return;
+    }
+
+    const nextIntent = summarizeIncidentMemories(zone, memoryMatches);
+    autoIntentRef.current = nextIntent;
+    setIntent(nextIntent);
+    addLog('EVOLUTION', `Loaded ${Math.min(memoryMatches.length, 5)} fallback incident(s) from unified memory for zone=${zone}.`, 'SUCCESS');
+  };
+
+  const hydrateIntentFromMemory = async (zone: string, force = false) => {
+    if (loadingData) return;
+
+    const shouldReplace = force || !intent.trim() || intent === autoIntentRef.current;
+    if (!shouldReplace) return;
+
+    setIsHydratingIntent(true);
+    addLog('EVOLUTION', `Hydrating incident log from SeedCore tracking events for zone=${zone}...`, 'INFO');
+
+    try {
+      const events = await seedcoreService.listEffectiveAppTrackingEvents(APP_TRACKING_ID, {
+        subject_type: APP_TRACKING_SUBJECT_TYPE,
+        subject_id: APP_TRACKING_ID,
+        event_types: [...EFFECTIVE_TRACKING_EVENT_TYPES],
+        limit: 50,
+      });
+      const matching = rankTrackingEvents(
+        events.filter(event => isEffectiveTrackingEvent(event) && matchesZoneTrackingEvent(event, zone))
+      );
+
+      if (matching.length === 0) {
+        addLog('EVOLUTION', `No zone-matched tracking events found for zone=${zone}; falling back to unified memory.`, 'WARN');
+        await hydrateIntentFromUnifiedMemory(zone);
+        return;
+      }
+
+      const nextIntent = summarizeTrackingEvents(zone, matching);
+      autoIntentRef.current = nextIntent;
+      setIntent(nextIntent);
+      addLog('EVOLUTION', `Loaded ${Math.min(matching.length, 5)} recent tracking event(s) into the evolution prompt for zone=${zone}.`, 'SUCCESS');
+    } catch (error: any) {
+      addLog('EVOLUTION', `Failed to hydrate incident log from tracking events: ${error?.message || String(error)}. Falling back to unified memory.`, 'WARN');
+      await hydrateIntentFromUnifiedMemory(zone);
+    } finally {
+      setIsHydratingIntent(false);
+    }
   };
 
   const resetPipeline = () => {
@@ -202,6 +450,12 @@ export const ControlPlane: React.FC = () => {
     };
     loadData();
   }, []);
+
+  useEffect(() => {
+    if (loadingData) return;
+    hydrateIntentFromMemory(selectedZone);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedZone, loadingData]);
 
   // Get active snapshot for deployment filtering
   // Priority: 1) Active PROD snapshot from DB, 2) Selected snapshot for deployment, 3) Draft snapshot
@@ -1144,6 +1398,20 @@ export const ControlPlane: React.FC = () => {
                 Human Intent / Incident Log
                 <span className="ml-2 text-xs font-normal text-gray-500">(Zone: {selectedZone})</span>
               </label>
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-xs text-gray-500">
+                  Latest SeedCore app-scoped tracking events can auto-populate this field for zone-aware evolution.
+                </div>
+                <button
+                  type="button"
+                  onClick={() => hydrateIntentFromMemory(selectedZone, true)}
+                  disabled={loadingData || isHydratingIntent || isEvolving}
+                  className="inline-flex items-center px-2 py-1 text-xs font-medium rounded border border-slate-300 text-slate-700 bg-white hover:bg-slate-50 disabled:bg-slate-100 disabled:text-slate-400"
+                >
+                  {isHydratingIntent ? <Loader2 className="animate-spin mr-1 h-3 w-3"/> : <Radio className="mr-1 h-3 w-3"/>}
+                  Load Recent Incidents
+                </button>
+              </div>
               <textarea
                 className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm border p-3 h-32"
                 value={intent}

@@ -156,6 +156,42 @@ export interface MultimodalVoice {
   ttl_seconds?: number;
 }
 
+export interface TrackingEvent {
+  id: string;
+  registration_id?: string | null;
+  event_type: string;
+  source_kind: string;
+  payload: Record<string, any>;
+  sha256: string;
+  captured_at: string;
+  subject_type?: string | null;
+  subject_id?: string | null;
+  producer_id?: string | null;
+  device_id?: string | null;
+  operator_id?: string | null;
+  correlation_id?: string | null;
+  snapshot_id?: number | null;
+  projected_at?: string | null;
+  created_at: string;
+}
+
+export type EffectiveTrackingEventType =
+  | "policy_decision_recorded"
+  | "runtime_incident_detected"
+  | "policy_implementation_reported";
+
+export interface TrackingEventFilters {
+  registration_id?: string;
+  producer_id?: string;
+  correlation_id?: string;
+  subject_type?: string;
+  subject_id?: string;
+  event_type?: string;
+  event_types?: string[];
+  limit?: number;
+  offset?: number;
+}
+
 export interface MultimodalVision {
   source: "vision";
   media_uri: string;
@@ -678,6 +714,89 @@ class SeedCoreService {
     }
     
     await this.request<void>("DELETE", `/facts/${matches[0].id}`);
+  }
+
+  // ------------------- Tracking Events -------------------
+
+  /**
+   * List tracking events ordered by latest `captured_at` first.
+   */
+  async listTrackingEvents(filters?: TrackingEventFilters): Promise<TrackingEvent[]> {
+    const params = new URLSearchParams();
+
+    if (filters?.registration_id) {
+      params.append("registration_id", filters.registration_id);
+    }
+    if (filters?.producer_id) {
+      params.append("producer_id", filters.producer_id);
+    }
+    if (filters?.correlation_id) {
+      params.append("correlation_id", filters.correlation_id);
+    }
+    if (filters?.subject_type) {
+      params.append("subject_type", filters.subject_type);
+    }
+    if (filters?.subject_id) {
+      params.append("subject_id", filters.subject_id);
+    }
+    if (filters?.event_type) {
+      params.append("event_type", filters.event_type);
+    }
+    if (filters?.event_types?.length) {
+      for (const eventType of filters.event_types) {
+        params.append("event_type", eventType);
+      }
+    }
+    if (typeof filters?.limit === "number" && filters.limit >= 0) {
+      params.append("limit", String(filters.limit));
+    }
+    if (typeof filters?.offset === "number" && filters.offset >= 0) {
+      params.append("offset", String(filters.offset));
+    }
+
+    const queryString = params.toString();
+    const endpoint = queryString ? `/tracking-events?${queryString}` : "/tracking-events";
+    return this.request<TrackingEvent[]>("GET", endpoint);
+  }
+
+  /**
+   * Get app-scoped tracking events for this simulator.
+   */
+  async listAppTrackingEvents(
+    appId: string,
+    options?: Omit<TrackingEventFilters, "producer_id" | "subject_type" | "subject_id">
+      & { subject_type?: string; subject_id?: string }
+  ): Promise<TrackingEvent[]> {
+    return this.listTrackingEvents({
+      ...options,
+      producer_id: appId,
+      subject_type: options?.subject_type || "application",
+      subject_id: options?.subject_id || appId,
+    });
+  }
+
+  async listEffectiveAppTrackingEvents(
+    appId: string,
+    options?: Omit<TrackingEventFilters, "producer_id" | "subject_type" | "subject_id" | "event_type">
+      & { subject_type?: string; subject_id?: string; event_types?: EffectiveTrackingEventType[] }
+  ): Promise<TrackingEvent[]> {
+    const eventTypes = options?.event_types || [
+      "policy_decision_recorded",
+      "runtime_incident_detected",
+      "policy_implementation_reported",
+    ];
+
+    return this.listAppTrackingEvents(appId, {
+      ...options,
+      event_types: eventTypes,
+    });
+  }
+
+  /**
+   * Fetch a single tracking event by id.
+   */
+  async getTrackingEvent(eventId: string): Promise<TrackingEvent> {
+    return this.request<TrackingEvent>("GET", `/tracking-events/${eventId}`);
   }
 
   // ------------------- PKG Evaluation -------------------

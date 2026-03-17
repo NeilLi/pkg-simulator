@@ -9,6 +9,12 @@ This document defines the first-pass contract expansion needed to move SeedCore 
 - make owner policy explicit instead of hiding it inside generic JSON blobs
 - support simulator and API work with stable field names
 
+## Authority Boundary
+
+For `pkg-simulator`, "policy defines authority" refers to runtime/business authority over governed actions such as `PUBLISH`, `PURCHASE`, `LIST`, and `APPROVE`.
+
+Application-layer authority over who may log in, author policy, approve policy changes, or promote snapshots is deferred for now. The simulator assumes a trusted operator context, and future authentication and RBAC should be implemented in the production control plane rather than folded into the policy schema itself.
+
 ## Core Schema Additions
 
 ### 1. Action Families

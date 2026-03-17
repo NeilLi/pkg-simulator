@@ -69,3 +69,4 @@ The database proxy URL defaults to `http://localhost:3011`.
 
 - The repository still contains some older PKG or design-governance helper services. The active simulator path is being aligned around the SeedCore runtime model first.
 - Database-backed pages rely on the proxy in [`server/db-proxy.js`](/Users/ningli/project/pkg-simulator/server/db-proxy.js).
+- During the `pkg-simulator` phase, policy-management authority is not enforced at the app-login layer. The simulator assumes a trusted operator context for policy authoring and testing, while authentication and role-based authorization for policy editing, approval, and promotion are deferred to the production control plane.

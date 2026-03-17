@@ -242,6 +242,55 @@ async function loadTaskStatusDefault() {
   }
 }
 
+function toPositiveInt(value) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+async function resolveTaskSnapshotId(client, requestedSnapshotId, metadata) {
+  const metadataSnapshotId = toPositiveInt(metadata?.snapshot_id);
+  const explicitSnapshotId = toPositiveInt(requestedSnapshotId) || metadataSnapshotId;
+
+  if (explicitSnapshotId) {
+    const exists = await client.query(
+      'SELECT id FROM pkg_snapshots WHERE id = $1',
+      [explicitSnapshotId]
+    );
+    if (exists.rows.length > 0) {
+      return explicitSnapshotId;
+    }
+    throw new Error(`Snapshot ${explicitSnapshotId} not found`);
+  }
+
+  const activeProd = await client.query(`
+    SELECT id
+    FROM pkg_snapshots
+    WHERE env = 'prod' AND is_active = TRUE
+    ORDER BY created_at DESC
+    LIMIT 1
+  `);
+  if (activeProd.rows[0]?.id) return activeProd.rows[0].id;
+
+  const activeAnyEnv = await client.query(`
+    SELECT id
+    FROM pkg_snapshots
+    WHERE is_active = TRUE
+    ORDER BY created_at DESC
+    LIMIT 1
+  `);
+  if (activeAnyEnv.rows[0]?.id) return activeAnyEnv.rows[0].id;
+
+  const latestSnapshot = await client.query(`
+    SELECT id
+    FROM pkg_snapshots
+    ORDER BY created_at DESC
+    LIMIT 1
+  `);
+  if (latestSnapshot.rows[0]?.id) return latestSnapshot.rows[0].id;
+
+  throw new Error('No snapshots available; cannot append event_working memory without snapshot_id');
+}
+
 
 // Health check
 app.get('/health', async (req, res) => {
@@ -2180,7 +2229,7 @@ app.post('/api/memory/append', async (req, res) => {
   try {
     await client.query('BEGIN');
     
-    const { tier, category, content, runId, metadata } = req.body;
+    const { tier, category, content, runId, metadata, snapshotId } = req.body;
     
     if (!tier || !category || !content) {
       await client.query('ROLLBACK');
@@ -2217,6 +2266,9 @@ app.post('/api/memory/append', async (req, res) => {
         original_category: category,
         task_category: category
       };
+
+      const resolvedSnapshotId = await resolveTaskSnapshotId(client, snapshotId, taskMetadata);
+      taskMetadata.snapshot_id = resolvedSnapshotId;
       
       // Insert into tasks table
       // Use SAVEPOINT before the insert to allow safe rollback on failure
@@ -2226,14 +2278,15 @@ app.post('/api/memory/append', async (req, res) => {
         // Always include status with the cached default value
         // This prevents NOT NULL constraint violations
         await client.query(`
-          INSERT INTO tasks (id, type, description, params, status)
-          VALUES ($1, $2, $3, $4, $5)
+          INSERT INTO tasks (id, type, description, params, status, snapshot_id)
+          VALUES ($1, $2, $3, $4, $5, $6)
         `, [
           taskId,
           taskType,
           content,
           JSON.stringify(taskMetadata),
-          TASK_STATUS_DEFAULT
+          TASK_STATUS_DEFAULT,
+          resolvedSnapshotId
         ]);
         
         await client.query('RELEASE SAVEPOINT sp_task_insert');
@@ -2279,7 +2332,8 @@ app.post('/api/memory/append', async (req, res) => {
         tier: 'event_working',
         category,
         content,
-        metadata: metadata || {}
+        snapshotId: resolvedSnapshotId,
+        metadata: taskMetadata
       });
     } else if (tier === 'knowledge_base') {
       // Write to graph_embeddings_1024 (Tier B/C)

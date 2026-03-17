@@ -47,6 +47,8 @@ The runtime goal is no longer just "govern release-style custody actions safely.
 - visualizing approval chains and evidence gaps
 - inspecting twin-state inputs used by the PDP
 
+For this simulator phase, the app may assume a trusted operator context. Login, user-role enforcement, and policy-management RBAC are intentionally out of scope here and belong to the future production control plane.
+
 ### Assistant Surface
 
 The assistant layer should remain advisory. It may:
@@ -101,6 +103,7 @@ First-class owner policy must cover:
 - replacing the current governance engine with cognitive logic
 - removing existing custody/release flows
 - designing a full marketplace backend inside SeedCore
+- implementing production authentication or RBAC for policy authoring and promotion
 
 ## Delivery Sequence
 

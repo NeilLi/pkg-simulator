@@ -1393,6 +1393,7 @@ app.get('/api/unified-memory', async (req, res) => {
                    row.memory_tier === 'knowledge_base' ? 'knowledge_base' :
                    row.memory_tier === 'world_memory' ? 'world_memory' :
                    'world_memory'), // Default to world_memory for any other value
+      status: row.metadata?.task_status || undefined,
       snapshotId: row.snapshot_id || undefined,
       metadata: row.metadata || {},
     })));

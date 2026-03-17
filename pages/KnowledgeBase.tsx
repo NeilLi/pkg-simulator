@@ -59,6 +59,26 @@ function formatDate(value?: string) {
   return d.toLocaleDateString();
 }
 
+function statusBadge(status?: string) {
+  if (!status) {
+    return <span className="text-xs text-gray-400 italic">—</span>;
+  }
+
+  const normalized = status.toLowerCase();
+  const cls =
+    normalized === 'completed' ? 'bg-emerald-100 text-emerald-800' :
+    normalized === 'failed' ? 'bg-rose-100 text-rose-800' :
+    normalized === 'running' ? 'bg-amber-100 text-amber-800' :
+    normalized === 'queued' || normalized === 'created' ? 'bg-slate-100 text-slate-700' :
+    'bg-gray-100 text-gray-700';
+
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${cls}`}>
+      {status}
+    </span>
+  );
+}
+
 export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
   const isMemory = view === 'memory';
 
@@ -246,7 +266,7 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
         </h3>
         <p className="mt-1 max-w-2xl text-sm text-gray-500">
           {isMemory
-            ? 'Unified memory feed across tiers (Working, Knowledge Base, World).'
+            ? 'Unified memory feed across tiers. Tier indicates where memory lives; status shows task lifecycle when available.'
             : 'Governed facts with temporal validity windows used for policy evaluation.'}
         </p>
       </div>
@@ -490,6 +510,7 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
               <thead className="bg-gray-50">
                 <tr>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tier</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Category</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Content</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Snapshot</th>
@@ -502,6 +523,7 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
                   return (
                     <tr key={mem.id} className="hover:bg-gray-50">
                       <td className="px-6 py-4 whitespace-nowrap">{tierBadge(mem.memoryTier)}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{statusBadge(mem.status ?? mem.metadata?.task_status)}</td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-700">{mem.category}</td>
                       <td className="px-6 py-4 text-sm text-gray-900 max-w-xl truncate" title={mem.content}>
                         {mem.content}

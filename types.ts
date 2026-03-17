@@ -130,6 +130,7 @@ export interface UnifiedMemoryItem {
   category: string;
   content: string;
   memoryTier: MemoryTier;
+  status?: string;
   vectorId?: string;
   metadata: any;
 }

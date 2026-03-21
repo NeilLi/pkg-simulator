@@ -1,7 +1,7 @@
 import { GoogleGenAI } from '@google/genai';
 import { getRuntimeZoneDefinition, RuntimeZoneId } from '../runtimeDomain';
 
-const DEFAULT_DB_PROXY = 'http://localhost:3011';
+const DEFAULT_DB_PROXY = import.meta.env.VITE_DB_PROXY_URL || 'http://127.0.0.1:3011';
 const SYSTEM_INSTRUCTION = 'Return STRICT JSON only. No markdown. No extra keys.';
 
 export type CustodySeedIntent = {

@@ -15,9 +15,46 @@ import express from 'express';
 import cors from 'cors';
 import { Pool } from 'pg';
 import crypto from 'crypto';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 const app = express();
 const PORT = process.env.DB_PROXY_PORT || 3011;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const PROJECT_ROOT = path.resolve(__dirname, '..');
+
+function loadEnvFile(filePath) {
+  if (!fs.existsSync(filePath)) return;
+
+  const content = fs.readFileSync(filePath, 'utf8');
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+
+    const equalsIndex = line.indexOf('=');
+    if (equalsIndex <= 0) continue;
+
+    const key = line.slice(0, equalsIndex).trim();
+    let value = line.slice(equalsIndex + 1).trim();
+
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+
+    if (!(key in process.env)) {
+      process.env[key] = value;
+    }
+  }
+}
+
+loadEnvFile(path.join(PROJECT_ROOT, '.env.local'));
+loadEnvFile(path.join(PROJECT_ROOT, '.env'));
 
 // Helper functions to store/retrieve artifactFormat in notes field as JSON metadata
 function parseNotesMetadata(notes) {
@@ -167,22 +204,60 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Database configuration (from environment or defaults matching docker/env.example)
-// Note: The actual database name is 'seedcore', not 'postgres' (see PG_DSN in env.example)
-const pool = new Pool({
-  host: process.env.POSTGRES_HOST || 'localhost',
-  port: parseInt(process.env.POSTGRES_PORT || '5432'),
-  database: process.env.POSTGRES_DB || 'seedcore',
-  user: process.env.POSTGRES_USER || 'postgres',
-  password: process.env.POSTGRES_PASSWORD || 'password',
+function resolveDbConfig() {
+  const connectionString =
+    process.env.PG_DSN ||
+    process.env.DATABASE_URL ||
+    process.env.POSTGRES_URL ||
+    process.env.PG_URL;
+
+  const fallback = {
+    host: process.env.POSTGRES_HOST || process.env.PGHOST || '127.0.0.1',
+    port: parseInt(process.env.POSTGRES_PORT || process.env.PGPORT || '5432', 10),
+    database: process.env.POSTGRES_DB || process.env.PGDATABASE || 'seedcore',
+    user: process.env.POSTGRES_USER || process.env.PGUSER || process.env.USER || os.userInfo().username,
+    password: process.env.POSTGRES_PASSWORD || process.env.PGPASSWORD || '',
+  };
+
+  if (!connectionString) {
+    return { ...fallback, source: 'discrete-env' };
+  }
+
+  try {
+    const url = new URL(connectionString);
+    return {
+      host: url.hostname || fallback.host,
+      port: parseInt(url.port || String(fallback.port), 10),
+      database: (url.pathname || '').replace(/^\//, '') || fallback.database,
+      user: decodeURIComponent(url.username || fallback.user),
+      password: decodeURIComponent(url.password || fallback.password),
+      source: 'dsn',
+    };
+  } catch (error) {
+    console.warn(`⚠️  Failed to parse PG_DSN/DATABASE_URL, falling back to discrete env: ${error.message}`);
+    return { ...fallback, source: 'discrete-env-fallback' };
+  }
+}
+
+const resolvedDb = resolveDbConfig();
+const poolConfig = {
+  host: resolvedDb.host,
+  port: resolvedDb.port,
+  database: resolvedDb.database,
+  user: resolvedDb.user,
   max: 20,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000, // Increased timeout
+  connectionTimeoutMillis: 10000,
   keepAlive: true,
   keepAliveInitialDelayMillis: 10000,
-  // Handle connection errors gracefully
   allowExitOnIdle: false,
-});
+};
+
+if (resolvedDb.password) {
+  poolConfig.password = resolvedDb.password;
+}
+
+const pool = new Pool(poolConfig);
 
 // Test connection and load enum defaults
 pool.on('connect', async () => {
@@ -296,7 +371,17 @@ async function resolveTaskSnapshotId(client, requestedSnapshotId, metadata) {
 app.get('/health', async (req, res) => {
   try {
     await pool.query('SELECT 1');
-    res.json({ status: 'ok', database: 'connected' });
+    res.json({
+      status: 'ok',
+      database: 'connected',
+      db: {
+        host: resolvedDb.host,
+        port: resolvedDb.port,
+        database: resolvedDb.database,
+        user: resolvedDb.user,
+        source: resolvedDb.source,
+      },
+    });
   } catch (error) {
     res.status(500).json({ status: 'error', error: error.message });
   }
@@ -3185,6 +3270,7 @@ app.listen(PORT, () => {
   console.log(`   POST   /api/validation/digital-twin`);
   console.log(`   POST   /api/policy/evaluate-temporal`);
   console.log(`   WS     /api/design/govern-stream`);
-  const dbName = process.env.POSTGRES_DB || 'seedcore';
-  console.log(`📊 Connected to PostgreSQL at ${process.env.POSTGRES_HOST || 'localhost'}:${process.env.POSTGRES_PORT || '5432'}/${dbName}`);
+  console.log(
+    `📊 Connected to PostgreSQL at ${resolvedDb.host}:${resolvedDb.port}/${resolvedDb.database} as ${resolvedDb.user} (${resolvedDb.source})`
+  );
 });

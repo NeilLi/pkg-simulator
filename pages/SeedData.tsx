@@ -15,7 +15,7 @@ import {
 import { RUNTIME_FOUNDATION_FACTS, RUNTIME_ZONES, RuntimeZoneId } from '../runtimeDomain';
 import { seedDataService, SeedResult } from '../services/seedDataService';
 
-const DEFAULT_DB_PROXY = 'http://localhost:3011';
+const DEFAULT_DB_PROXY = import.meta.env.VITE_DB_PROXY_URL || 'http://127.0.0.1:3011';
 
 type MemoryWriteMode = 'dry_run' | 'event_working' | 'event_then_approve';
 

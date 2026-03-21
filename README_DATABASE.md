@@ -8,7 +8,7 @@ Since the PKG Simulator runs in a browser environment, it cannot directly connec
 
 1. **Frontend (Browser)**: React/Vite app that makes HTTP requests
 2. **Proxy Server**: Express.js server that connects to PostgreSQL
-3. **Database**: PostgreSQL (port-forwarded from Kubernetes)
+3. **Database**: PostgreSQL (local host Postgres or port-forwarded Kubernetes Postgres)
 
 ## Setup
 
@@ -21,18 +21,57 @@ npm install
 
 ### 2. Configure Database Connection
 
-The proxy server uses environment variables matching `docker/env.example`:
+The proxy server loads `.env.local` and supports either a single DSN or discrete Postgres fields.
+
+Recommended local macOS config:
 
 ```bash
-# Set these environment variables (or use defaults)
-export POSTGRES_HOST=localhost
-export POSTGRES_PORT=5432
-export POSTGRES_DB=seedcore  # Note: database name is 'seedcore', not 'postgres'
-export POSTGRES_USER=postgres
-export POSTGRES_PASSWORD=password
+cp .env.local.example .env.local
 ```
 
-### 3. Start Port Forwarding
+Then set one of these:
+
+```bash
+PG_DSN=postgresql://ningli@127.0.0.1:5432/seedcore
+```
+
+or:
+
+```bash
+POSTGRES_HOST=127.0.0.1
+POSTGRES_PORT=5432
+POSTGRES_DB=seedcore
+POSTGRES_USER=ningli
+POSTGRES_PASSWORD=
+```
+
+### 3. Start PostgreSQL
+
+For the SeedCore local stack on macOS:
+
+```bash
+brew services start postgresql@17
+```
+
+### 4. Start the Database Proxy Server
+
+In one terminal:
+
+```bash
+npm run db-proxy
+```
+
+The proxy server will start on `http://127.0.0.1:3011` by default.
+
+Verify the connection:
+
+```bash
+curl http://127.0.0.1:3011/health
+```
+
+The health response now includes the resolved DB target so you can confirm which Postgres instance it is using.
+
+### 5. Optional: Kubernetes Port Forwarding
 
 Make sure you have port-forwarded PostgreSQL from your Kubernetes cluster:
 
@@ -43,23 +82,11 @@ cd deploy
 
 This should forward PostgreSQL to `localhost:5432`.
 
-### 4. Start the Database Proxy Server
-
-In one terminal:
-
-```bash
-cd tools/pkg-simulator-v2.6
-npm run db-proxy
-```
-
-The proxy server will start on `http://localhost:3011` by default.
-
-### 5. Start the Vite Dev Server
+### 6. Start the Vite Dev Server
 
 In another terminal:
 
 ```bash
-cd tools/pkg-simulator-v2.6
 npm run dev
 ```
 
@@ -70,21 +97,16 @@ The frontend will start on `http://localhost:3000` and will connect to the proxy
 ### Environment Variables
 
 **Proxy Server** (Node.js):
-- `POSTGRES_HOST` - PostgreSQL host (default: `localhost`)
+- `PG_DSN` / `DATABASE_URL` - preferred full Postgres DSN
+- `POSTGRES_HOST` - PostgreSQL host (default: `127.0.0.1`)
 - `POSTGRES_PORT` - PostgreSQL port (default: `5432`)
-- `POSTGRES_DB` - Database name (default: `postgres`)
-- `POSTGRES_USER` - Database user (default: `postgres`)
-- `POSTGRES_PASSWORD` - Database password (default: `password`)
+- `POSTGRES_DB` - Database name (default: `seedcore`)
+- `POSTGRES_USER` - Database user (default: current OS user)
+- `POSTGRES_PASSWORD` - Database password (default: empty)
 - `DB_PROXY_PORT` - Proxy server port (default: `3011`)
 
 **Frontend** (Vite):
-- `VITE_DB_PROXY_URL` - Proxy server URL (default: `http://localhost:3011`)
-
-You can create a `.env` file in `tools/pkg-simulator-v2.6/`:
-
-```env
-VITE_DB_PROXY_URL=http://localhost:3011
-```
+- `VITE_DB_PROXY_URL` - Proxy server URL (default: `http://127.0.0.1:3011`)
 
 ## API Endpoints
 

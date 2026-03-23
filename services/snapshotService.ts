@@ -213,6 +213,9 @@ function normalizeSnapshot(data: any): Snapshot {
     notes: data.notes,
     artifactFormat: data.artifactFormat,
     parentId: data.parentId,
+    artifactReady: data.artifactReady,
+    compiledRulesCount: data.compiledRulesCount,
+    totalRulesCount: data.totalRulesCount,
   };
 }
 

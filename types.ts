@@ -48,6 +48,9 @@ export interface Snapshot {
   notes?: string;
   parentId?: number;
   artifactFormat?: 'native' | 'wasm';
+  artifactReady?: boolean;
+  compiledRulesCount?: number;
+  totalRulesCount?: number;
 }
 
 export interface SubtaskType {

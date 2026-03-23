@@ -128,19 +128,22 @@ export interface PKGCompileRulesRequest {
 
 export interface PKGCompileRulesResponse {
   snapshot_id: number;
-  compiled_count: number;
-  rules: Array<{
+  compiled_count?: number;
+  rules?: Array<{
     rule_id: number;
     rule_name: string;
     compiled: boolean;
     hash: string;
   }>;
-  artifact_created: boolean;
+  artifact_created?: boolean;
+  success?: boolean;
+  message?: string;
   artifact_hash?: string; // May be undefined if API returns different field name
   sha256?: string; // Alternative field name (common in backend responses)
   checksum?: string; // Alternative field name
   bundle_sha256?: string; // Alternative field name
   size_bytes?: number;
+  wasm_size_bytes?: number;
 }
 
 export interface MultimodalVoice {
@@ -1197,8 +1200,12 @@ class SeedCoreService {
         try {
           const errorDetail = JSON.parse(errorText);
           const detail = errorDetail.detail || errorDetail;
-          if (typeof detail === 'object' && detail.error) {
-            errorMessage = detail.error;
+          if (typeof detail === 'object' && detail) {
+            if (typeof detail.message === 'string' && detail.message.trim()) {
+              errorMessage = detail.message;
+            } else if (typeof detail.error === 'string' && detail.error.trim()) {
+              errorMessage = detail.error;
+            }
           } else if (typeof detail === 'string') {
             errorMessage = detail;
           }
@@ -1214,8 +1221,12 @@ class SeedCoreService {
           throw error;
         }
         
-        // Handle 503 (OPA not available or compilation failed)
-        if (response.status === 503) {
+        // Handle OPA/compiler failures even when backend returns 500/503
+        if (
+          response.status === 503 ||
+          errorMessage.includes('OPA binary not found') ||
+          errorMessage.includes('Compilation failed')
+        ) {
           const error = new Error(`COMPILATION_FAILED: ${errorMessage}`);
           (error as any).status = 503;
           (error as any).originalMessage = errorText;

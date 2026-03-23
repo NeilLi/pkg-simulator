@@ -1015,6 +1015,9 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
     }
   };
 
+  const isSnapshotWasmReady = (snapshot?: Snapshot | null) =>
+    Boolean(snapshot && snapshot.artifactFormat === 'wasm' && snapshot.artifactReady);
+
   // -------- Step 3: Promote --------
   const handlePromoteToWasm = async () => {
     if (!draftSnapshot) return;
@@ -1074,8 +1077,8 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
   const handleValidate = async () => {
     const runId = pipelineIdRef.current;
 
-    if (!draftSnapshot || draftSnapshot.artifactFormat !== 'wasm') {
-      addLog('VALIDATION', 'Cannot validate: snapshot must be WASM first.', 'ERROR', runId);
+    if (!isSnapshotWasmReady(draftSnapshot)) {
+      addLog('VALIDATION', 'Cannot validate: snapshot must be fully compiled to WASM first.', 'ERROR', runId);
       return;
     }
 
@@ -1159,11 +1162,11 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
     // If not WASM, automatically promote it first (for first-time deployment convenience)
     let finalSnapshotToDeploy = snapshotToDeploy;
     
-    if (selectedSnapshotForDeployment && snapshotToDeploy.artifactFormat !== 'wasm') {
+    if (selectedSnapshotForDeployment && !isSnapshotWasmReady(snapshotToDeploy)) {
       // Check if this is a first-time deployment scenario (no deployments exist)
       const isFirstTimeDeployment = deployments.length === 0;
       
-      if (isFirstTimeDeployment && (snapshotToDeploy.artifactFormat === 'native' || !snapshotToDeploy.artifactFormat)) {
+      if (isFirstTimeDeployment) {
         // Automatically promote to WASM for first-time deployment
         addLog('DEPLOYMENT', `Promoting snapshot ${snapshotToDeploy.version} to WASM format before deployment...`, 'INFO', runId);
         
@@ -1210,14 +1213,14 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
         }
       } else {
         // Not first-time or not native format - require manual promotion
-        addLog('DEPLOYMENT', `Cannot deploy: Snapshot ${snapshotToDeploy.version} must be promoted to WASM format first. Use the "Promote to WASM" button.`, 'ERROR', runId);
+        addLog('DEPLOYMENT', `Cannot deploy: Snapshot ${snapshotToDeploy.version} is not backed by a compiled WASM artifact yet. Use the "Promote to WASM" button first.`, 'ERROR', runId);
         return;
       }
     }
     
-    // Final check: ensure snapshot is WASM format
-    if (!finalSnapshotToDeploy || finalSnapshotToDeploy.artifactFormat !== 'wasm') {
-      addLog('DEPLOYMENT', `Cannot deploy: Snapshot must be in WASM format.`, 'ERROR', runId);
+    // Final check: ensure snapshot is backed by a real artifact
+    if (!isSnapshotWasmReady(finalSnapshotToDeploy)) {
+      addLog('DEPLOYMENT', `Cannot deploy: Snapshot must have a compiled WASM artifact.`, 'ERROR', runId);
       return;
     }
     
@@ -1694,10 +1697,9 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
                  >
                    <option value="">Select snapshot to deploy...</option>
                    {prodSnapshots
-                     .filter(s => s.artifactFormat === 'wasm' || !s.artifactFormat) // Allow WASM or undefined (from initialization)
                      .map(s => (
                        <option key={s.id} value={s.id}>
-                         {s.version} {s.isActive ? '★' : ''} (id={s.id})
+                         {s.version} {s.isActive ? '★' : ''} (id={s.id}) {isSnapshotWasmReady(s) ? '[WASM ready]' : s.artifactFormat === 'wasm' ? '[metadata only]' : '[native]'}
                        </option>
                      ))}
                  </select>
@@ -1710,13 +1712,13 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
                </div>
              )}
              
-             {!draftSnapshot || draftSnapshot.artifactFormat !== 'wasm' ? (
+             {!isSnapshotWasmReady(draftSnapshot) ? (
                <div className="flex-1 flex flex-col items-center justify-center text-gray-400">
                   <ShieldAlert className="h-12 w-12 mx-auto mb-2 opacity-20" />
                   <p className="text-sm text-center">
                     {!draftSnapshot 
                       ? 'Waiting for WASM snapshot...' 
-                      : 'Snapshot must be promoted to WASM format before validation'}
+                      : 'Snapshot must be compiled and backed by a WASM artifact before validation'}
                   </p>
                </div>
              ) : !validationResult ? (

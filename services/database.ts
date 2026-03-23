@@ -74,6 +74,9 @@ export async function fetchSnapshots(): Promise<Snapshot[]> {
     artifactFormat: (row.artifactFormat === 'native' || row.artifactFormat === 'wasm') 
       ? row.artifactFormat 
       : undefined,
+    artifactReady: Boolean(row.artifactReady),
+    compiledRulesCount: typeof row.compiledRulesCount === 'number' ? row.compiledRulesCount : undefined,
+    totalRulesCount: typeof row.totalRulesCount === 'number' ? row.totalRulesCount : undefined,
   }));
 }
 

@@ -393,8 +393,36 @@ app.get('/api/snapshots', async (req, res) => {
     const result = await queryWithRetry(async () => {
       return await pool.query(`
         SELECT 
-          id, version, env, is_active, checksum, size_bytes, created_at, notes
+          s.id,
+          s.version,
+          s.env,
+          s.is_active,
+          s.checksum,
+          s.size_bytes,
+          s.created_at,
+          s.notes,
+          EXISTS (
+            SELECT 1
+            FROM pkg_snapshot_artifacts a
+            WHERE a.snapshot_id = s.id
+              AND a.artifact_type = 'wasm_pack'
+              AND a.artifact_bytes IS NOT NULL
+          ) AS artifact_ready,
+          (
+            SELECT COUNT(*)
+            FROM pkg_policy_rules r
+            WHERE r.snapshot_id = s.id
+              AND r.disabled = FALSE
+          ) AS total_rules_count,
+          (
+            SELECT COUNT(*)
+            FROM pkg_policy_rules r
+            WHERE r.snapshot_id = s.id
+              AND r.disabled = FALSE
+              AND r.compiled_rule IS NOT NULL
+          ) AS compiled_rules_count
         FROM pkg_snapshots
+        s
         ORDER BY created_at DESC
       `);
     });
@@ -410,6 +438,9 @@ app.get('/api/snapshots', async (req, res) => {
         createdAt: row.created_at.toISOString(),
         notes: cleanNotes || undefined,
         artifactFormat: artifactFormat || undefined,
+        artifactReady: row.artifact_ready,
+        totalRulesCount: Number(row.total_rules_count || 0),
+        compiledRulesCount: Number(row.compiled_rules_count || 0),
       };
     }));
   } catch (error) {
@@ -425,9 +456,36 @@ app.get('/api/snapshots/:id', async (req, res) => {
     const result = await queryWithRetry(async () => {
       return await pool.query(`
         SELECT 
-          id, version, env, is_active, checksum, size_bytes, created_at, notes
-        FROM pkg_snapshots
-        WHERE id = $1
+          s.id,
+          s.version,
+          s.env,
+          s.is_active,
+          s.checksum,
+          s.size_bytes,
+          s.created_at,
+          s.notes,
+          EXISTS (
+            SELECT 1
+            FROM pkg_snapshot_artifacts a
+            WHERE a.snapshot_id = s.id
+              AND a.artifact_type = 'wasm_pack'
+              AND a.artifact_bytes IS NOT NULL
+          ) AS artifact_ready,
+          (
+            SELECT COUNT(*)
+            FROM pkg_policy_rules r
+            WHERE r.snapshot_id = s.id
+              AND r.disabled = FALSE
+          ) AS total_rules_count,
+          (
+            SELECT COUNT(*)
+            FROM pkg_policy_rules r
+            WHERE r.snapshot_id = s.id
+              AND r.disabled = FALSE
+              AND r.compiled_rule IS NOT NULL
+          ) AS compiled_rules_count
+        FROM pkg_snapshots s
+        WHERE s.id = $1
       `, [snapshotId]);
     });
     
@@ -447,6 +505,9 @@ app.get('/api/snapshots/:id', async (req, res) => {
       createdAt: row.created_at.toISOString(),
       notes: cleanNotes || undefined,
       artifactFormat: artifactFormat || undefined,
+      artifactReady: row.artifact_ready,
+      totalRulesCount: Number(row.total_rules_count || 0),
+      compiledRulesCount: Number(row.compiled_rules_count || 0),
     });
   } catch (error) {
     console.error('Error fetching snapshot:', error);

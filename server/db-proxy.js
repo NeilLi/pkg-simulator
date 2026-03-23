@@ -1565,15 +1565,6 @@ app.post('/api/snapshots', async (req, res) => {
     const result = await pool.query(`
       INSERT INTO pkg_snapshots (version, env, entrypoint, schema_version, checksum, size_bytes, signature, notes, is_active)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-      ON CONFLICT (version) DO UPDATE SET
-        env = EXCLUDED.env,
-        entrypoint = EXCLUDED.entrypoint,
-        schema_version = EXCLUDED.schema_version,
-        checksum = EXCLUDED.checksum,
-        size_bytes = EXCLUDED.size_bytes,
-        signature = EXCLUDED.signature,
-        notes = EXCLUDED.notes,
-        is_active = EXCLUDED.is_active
       RETURNING id, version, env, is_active, checksum, size_bytes, created_at, notes
     `, [
       version,
@@ -1599,6 +1590,11 @@ app.post('/api/snapshots', async (req, res) => {
       notes: row.notes || undefined,
     });
   } catch (error) {
+    if (error?.code === '23505') {
+      return res.status(409).json({
+        error: `Snapshot version "${req.body?.version}" already exists. Candidate snapshots must use a new version.`,
+      });
+    }
     console.error('Error creating snapshot:', error);
     res.status(500).json({ error: error.message });
   }

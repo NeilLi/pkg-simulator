@@ -8,6 +8,7 @@ export interface CreateRuleParams {
   priority: number;
   engine: PkgEngine;
   ruleSource?: string;
+  metadata?: any;
   conditions: Array<{
     conditionType: PkgConditionType;
     conditionKey: string;
@@ -100,6 +101,7 @@ export async function createRule(params: CreateRuleParams): Promise<Rule> {
       priority: params.priority ?? 100,
       engine: params.engine,
       ruleSource: params.ruleSource || null,
+      metadata: params.metadata ?? null,
       conditions: params.conditions,
       emissions: params.emissions,
     }),

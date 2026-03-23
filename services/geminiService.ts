@@ -3,6 +3,104 @@ import { Snapshot, Rule, Fact, SubtaskType, EvolutionProposal } from "../types";
 
 const LLM_MODEL = process.env.LLM_MODEL || "gemini-3-flash-preview";
 
+const asArray = <T>(value: unknown): T[] => (Array.isArray(value) ? value as T[] : []);
+
+const CONDITION_TYPE_ALIASES: Record<string, string> = {
+  BASIC: 'VALUE',
+  FIELD: 'VALUE',
+  ATTRIBUTE: 'VALUE',
+  METRIC: 'SIGNAL',
+  BOOLEAN: 'SIGNAL',
+  LABEL: 'TAG',
+};
+
+const normalizeConditionType = (raw: unknown) => {
+  const normalized = String(raw ?? '').trim().toUpperCase();
+  return CONDITION_TYPE_ALIASES[normalized] || normalized;
+};
+
+const OPERATOR_ALIASES: Record<string, string> = {
+  EQ: '=',
+  EQUALS: '=',
+  NE: '!=',
+  NOT_EQUALS: '!=',
+  GTE: '>=',
+  LTE: '<=',
+  GT: '>',
+  LT: '<',
+};
+
+const normalizeOperator = (raw: unknown) => {
+  const normalized = String(raw ?? '').trim().toUpperCase();
+  return OPERATOR_ALIASES[normalized] || normalized;
+};
+
+const normalizeCondition = (condition: any) => {
+  if (!condition || typeof condition !== 'object') {
+    return {
+      conditionType: '',
+      conditionKey: '',
+      operator: '',
+      value: undefined,
+    };
+  }
+
+  return {
+    ...condition,
+    conditionType: normalizeConditionType(condition.conditionType ?? condition.condition_type ?? ''),
+    conditionKey: String(condition.conditionKey ?? condition.condition_key ?? '').trim(),
+    operator: normalizeOperator(condition.operator ?? ''),
+    value: condition.value === undefined || condition.value === null ? undefined : String(condition.value),
+  };
+};
+
+const normalizeEmission = (emission: any) => {
+  if (!emission || typeof emission !== 'object') {
+    return {
+      subtaskName: '',
+      subtaskTypeId: '',
+      relationshipType: '',
+      params: undefined,
+    };
+  }
+
+  return {
+    ...emission,
+    subtaskName: String(emission.subtaskName ?? emission.subtask_name ?? '').trim(),
+    subtaskTypeId: String(emission.subtaskTypeId ?? emission.subtask_type_id ?? '').trim(),
+    relationshipType: String(emission.relationshipType ?? emission.relationship_type ?? '').trim().toUpperCase(),
+    params: emission.params ?? undefined,
+  };
+};
+
+const normalizeRuleData = (ruleData: any) => {
+  if (!ruleData || typeof ruleData !== 'object') return undefined;
+  return {
+    ...ruleData,
+    ruleName: String(ruleData.ruleName ?? ruleData.rule_name ?? '').trim(),
+    priority: typeof ruleData.priority === 'number' ? ruleData.priority : Number(ruleData.priority ?? 100),
+    engine: String(ruleData.engine ?? 'wasm').trim().toLowerCase(),
+    ruleSource: typeof ruleData.ruleSource === 'string'
+      ? ruleData.ruleSource
+      : typeof ruleData.rule_source === 'string'
+      ? ruleData.rule_source
+      : undefined,
+    conditions: asArray(ruleData.conditions).map(normalizeCondition),
+    emissions: asArray(ruleData.emissions).map(normalizeEmission),
+  };
+};
+
+const normalizeEvolutionProposal = (data: any): Omit<EvolutionProposal, 'id' | 'baseSnapshotId' | 'status' | 'generatedAt'> => ({
+  newVersion: typeof data?.newVersion === 'string' && data.newVersion.trim() ? data.newVersion.trim() : `v${Date.now()}`,
+  reason: typeof data?.reason === 'string' && data.reason.trim() ? data.reason.trim() : 'Policy evolution proposal generated from incident intent.',
+  changes: asArray<any>(data?.changes).map((change) => ({
+    action: change?.action,
+    ruleId: typeof change?.ruleId === 'string' ? change.ruleId : undefined,
+    rationale: typeof change?.rationale === 'string' && change.rationale.trim() ? change.rationale.trim() : 'No rationale provided.',
+    ruleData: normalizeRuleData(change?.ruleData),
+  })),
+});
+
 export interface GenerateRuleParams {
   prompt: string;
   snapshotId: number;
@@ -301,10 +399,17 @@ export const generateFactFromNaturalLanguage = async (params: GenerateFactParams
   }
 };
 
+export interface GenerateEvolutionPlanParams {
+  intent: string;
+  currentVersion: string;
+  contextFacts: any[];
+  snapshot?: Snapshot;
+  existingRules?: Rule[];
+  subtaskTypes?: SubtaskType[];
+}
+
 export const generateEvolutionPlan = async (
-  intent: string, 
-  currentVersion: string, 
-  contextFacts: any[]
+  params: GenerateEvolutionPlanParams
 ): Promise<EvolutionProposal | null> => {
   if (!process.env.API_KEY) return null;
 
@@ -319,6 +424,12 @@ export const generateEvolutionPlan = async (
       2. You must provide a "rationale" for every change.
       3. Your output must be a JSON object matching the EvolutionProposal schema (excluding id/status).
       4. Suggest a semantic version bump.
+      5. Every CREATE or MODIFY ruleData must include at least one condition and at least one emission.
+      6. Do not emit empty arrays for conditions or emissions.
+      7. Use the exact field names conditionType, conditionKey, operator, value, subtaskName, relationshipType, params.
+      8. Do not use snake_case keys like condition_type, condition_key, relationship_type, or subtask_name.
+      9. Valid conditionType values are only TAG, SIGNAL, VALUE, FACT. Never emit BASIC or any other enum.
+      10. Valid operator values are only =, !=, >=, <=, >, <, EXISTS, IN, MATCHES. Never emit GTE/LTE/EQUALS spellings.
 
       Schema:
       {
@@ -335,14 +446,43 @@ export const generateEvolutionPlan = async (
       }
     `;
 
+    const contextParts: string[] = [];
+
+    if (params.snapshot) {
+      contextParts.push(`Current Snapshot: ${params.snapshot.version} (${params.snapshot.env})`);
+      if (params.snapshot.notes) {
+        contextParts.push(`Snapshot Notes: ${params.snapshot.notes}`);
+      }
+    }
+
+    if (params.subtaskTypes && params.subtaskTypes.length > 0) {
+      contextParts.push(`Available Subtask Types (${params.subtaskTypes.length}):`);
+      params.subtaskTypes.forEach((st, idx) => {
+        contextParts.push(`${idx + 1}. ${st.name}${st.defaultParams ? ` (default: ${JSON.stringify(st.defaultParams)})` : ''}`);
+      });
+    }
+
+    if (params.existingRules && params.existingRules.length > 0) {
+      contextParts.push(`Existing Rules (${params.existingRules.length}):`);
+      params.existingRules.slice(0, 10).forEach((rule, idx) => {
+        const conds = rule.conditions.map(c => `${c.conditionKey} ${c.operator} ${c.value || 'EXISTS'}`).join(', ');
+        const ems = rule.emissions.map(e => `${e.relationshipType}:${e.subtaskName || e.subtaskTypeId || 'unknown'}`).join(', ');
+        contextParts.push(`${idx + 1}. ${rule.ruleName} [${rule.engine}] conditions=[${conds}] emissions=[${ems}]`);
+      });
+    }
+
     const userPrompt = `
-      Current Version: ${currentVersion}
-      Context/Facts Sample: ${JSON.stringify(contextFacts.slice(0, 3))}
+      Current Version: ${params.currentVersion}
+      Context/Facts Sample: ${JSON.stringify(params.contextFacts.slice(0, 5))}
+      ${contextParts.length ? `\nDetailed Snapshot Context:\n${contextParts.join('\n')}\n` : ''}
       
       Human Intent / Incident Log:
-      "${intent}"
+      "${params.intent}"
 
       Propose a safe evolution plan.
+      Use ONLY available subtask names from the provided context.
+      Every emission must include both subtaskName and relationshipType.
+      Do not invent new subtask names when an existing one already fits.
     `;
 
     const response = await ai.models.generateContent({
@@ -357,7 +497,7 @@ export const generateEvolutionPlan = async (
     const text = response.text;
     if (!text) return null;
 
-    const data = JSON.parse(text);
+    const data = normalizeEvolutionProposal(JSON.parse(text));
     
     return {
       id: `prop-${Date.now()}`,

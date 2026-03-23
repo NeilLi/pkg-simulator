@@ -146,6 +146,61 @@ export interface PKGCompileRulesResponse {
   wasm_size_bytes?: number;
 }
 
+export interface PKGSnapshotCompareRequest {
+  baseline_snapshot_id: number;
+  candidate_snapshot_id: number;
+  task_facts?: {
+    tags?: string[];
+    signals?: Record<string, any>;
+    context?: Record<string, any>;
+    governed_facts?: any[];
+    semantic_context?: any[];
+    memory_hits?: any[];
+  };
+  fixture_id?: number;
+  embedding?: number[];
+  mode?: PKGMode;
+}
+
+export interface PKGSnapshotCompareResponse {
+  run_id: number;
+  baseline_snapshot: {
+    id: number;
+    version: string;
+    checksum?: string;
+    engine?: string;
+  };
+  candidate_snapshot: {
+    id: number;
+    version: string;
+    checksum?: string;
+    engine?: string;
+  };
+  summary: {
+    behavior_changed: boolean;
+    changed_rule_count: number;
+    emissions: {
+      added: number;
+      removed: number;
+      changed: number;
+    };
+    dag: {
+      added: number;
+      removed: number;
+      changed: number;
+    };
+  };
+  comparison: {
+    baseline: Record<string, any>;
+    candidate: Record<string, any>;
+    diff: {
+      emissions: any[];
+      dag: any[];
+      [key: string]: any;
+    };
+  };
+}
+
 export interface MultimodalVoice {
   source: "voice";
   media_uri: string;
@@ -1264,6 +1319,65 @@ class SeedCoreService {
         throw error;
       }
       throw new Error(`PKG compilation failed: ${String(error)}`);
+    }
+  }
+
+  async comparePKGSnapshots(
+    payload: PKGSnapshotCompareRequest
+  ): Promise<PKGSnapshotCompareResponse> {
+    try {
+      const response = await fetch(`${this.apiV1Base}/pkg/snapshots/compare`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          ...payload,
+          mode: payload.mode || "advisory",
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        let errorMessage = `PKG snapshot compare failed (${response.status}): ${errorText}`;
+
+        try {
+          const errorDetail = JSON.parse(errorText);
+          const detail = errorDetail.detail || errorDetail;
+          if (typeof detail === "object" && detail) {
+            if (typeof detail.message === "string" && detail.message.trim()) {
+              errorMessage = detail.message;
+            } else if (typeof detail.error === "string" && detail.error.trim()) {
+              errorMessage = detail.error;
+            }
+          } else if (typeof detail === "string") {
+            errorMessage = detail;
+          }
+        } catch {
+          // Keep raw error text
+        }
+
+        const error = new Error(errorMessage);
+        (error as any).status = response.status;
+        (error as any).originalMessage = errorText;
+        throw error;
+      }
+
+      return await response.json();
+    } catch (error) {
+      if (error instanceof Error) {
+        if (
+          error.message.includes("Failed to fetch") ||
+          error.message.includes("NetworkError") ||
+          error.message.includes("ECONNREFUSED")
+        ) {
+          const networkError = new Error("SERVER_NOT_RUNNING");
+          (networkError as any).originalError = error;
+          throw networkError;
+        }
+        throw error;
+      }
+      throw new Error(`Unknown error comparing PKG snapshots: ${String(error)}`);
     }
   }
 }

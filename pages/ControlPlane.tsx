@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 
 import { getSnapshots, getRules, getSubtaskTypes, getDeployments, clearCache } from '../mockData';
-import { EvolutionProposal, AgentLog, Snapshot, ValidationRun, Rule, PkgEnv, SubtaskType, Deployment, DeploymentTarget, UnifiedMemoryItem } from '../types';
+import { EvolutionProposal, AgentLog, Snapshot, ValidationRun, Rule, PkgEnv, SubtaskType, Deployment, DeploymentTarget, UnifiedMemoryItem, PkgRelation } from '../types';
 
 import {
   proposeEvolution,
@@ -23,6 +23,7 @@ import { createRule } from '../services/ruleService';
 import { createOrUpdateDeployment, rollbackDeploymentLane, getRolloutEvents } from '../services/deploymentService';
 import { seedcoreService, TrackingEvent } from '../services/seedcoreService';
 import { fetchUnifiedMemory } from '../services/database';
+import { cloneSubtaskTypes } from '../services/subtaskTypeService';
 
 const APP_TRACKING_ID = 'pkg-simulator';
 const APP_TRACKING_SUBJECT_TYPE = 'application';
@@ -72,6 +73,174 @@ function ruleSourceFromIntentOrStructure(intent?: string, rule?: Partial<Rule>) 
   return 'Generated rule';
 }
 
+function collectRulePersistenceIssues(
+  rules: Rule[],
+  availableSubtaskTypes: SubtaskType[]
+) {
+  const availableNames = new Set(availableSubtaskTypes.map(st => st.name));
+  const issues: string[] = [];
+
+  rules.forEach((rule, ruleIndex) => {
+    const label = rule.ruleName || `rule_${ruleIndex + 1}`;
+
+    if (!Array.isArray(rule.conditions) || rule.conditions.length === 0) {
+      issues.push(`Rule "${label}" is missing conditions.`);
+    }
+    if (!Array.isArray(rule.emissions) || rule.emissions.length === 0) {
+      issues.push(`Rule "${label}" is missing emissions.`);
+    }
+
+    (rule.conditions || []).forEach((condition, conditionIndex) => {
+      if (!condition.conditionType) {
+        issues.push(`Rule "${label}" condition ${conditionIndex + 1} is missing conditionType.`);
+      }
+      if (!condition.conditionKey?.trim()) {
+        issues.push(`Rule "${label}" condition ${conditionIndex + 1} is missing conditionKey.`);
+      }
+      if (!condition.operator) {
+        issues.push(`Rule "${label}" condition ${conditionIndex + 1} is missing operator.`);
+      }
+    });
+
+    (rule.emissions || []).forEach((emission, emissionIndex) => {
+      if (!emission.relationshipType) {
+        issues.push(`Rule "${label}" emission ${emissionIndex + 1} is missing relationshipType.`);
+      }
+      if (!emission.subtaskTypeId && !emission.subtaskName) {
+        issues.push(`Rule "${label}" emission ${emissionIndex + 1} is missing subtask mapping.`);
+      }
+      if (emission.subtaskName && !availableNames.has(emission.subtaskName)) {
+        issues.push(`Rule "${label}" emission ${emissionIndex + 1} references unknown subtask "${emission.subtaskName}".`);
+      }
+    });
+  });
+
+  return issues;
+}
+
+function resolveUsableSubtaskTypes(
+  allSubtaskTypes: SubtaskType[],
+  preferredSnapshotId: number | null | undefined
+) {
+  const bySnapshot = preferredSnapshotId
+    ? allSubtaskTypes.filter(st => st.snapshotId === preferredSnapshotId)
+    : [];
+  return bySnapshot.length > 0 ? bySnapshot : allSubtaskTypes;
+}
+
+const EMISSION_SUBTASK_ALIASES: Record<string, string> = {
+  gate_approval_workflow: 'authorize_release_window',
+  approval_gate: 'authorize_release_window',
+  approval_workflow: 'authorize_release_window',
+  operator_review: 'dispatch_operator_review',
+  notify_operations: 'notify_control_plane',
+  control_plane_notification: 'notify_control_plane',
+  playback_evidence_capture: 'capture_playback_evidence',
+  custody_memory_sync: 'sync_custody_memory',
+  environmental_stabilization: 'stabilize_environmental_controls',
+  stabilize_environment: 'stabilize_environmental_controls',
+  zone_lockdown: 'lock_zone_access',
+  quarantine_asset: 'quarantine_asset_lot',
+  identity_provenance_verification: 'verify_identity_and_provenance',
+  robotic_handoff_routing: 'route_robotic_handoff',
+};
+
+const DEFAULT_RELATIONSHIP_BY_SUBTASK: Record<string, PkgRelation> = {
+  authorize_release_window: 'GATE',
+  verify_identity_and_provenance: 'GATE',
+  lock_zone_access: 'GATE',
+  dispatch_operator_review: 'ORDERS',
+  route_robotic_handoff: 'ORDERS',
+  notify_control_plane: 'EMITS',
+  quarantine_asset_lot: 'EMITS',
+  capture_playback_evidence: 'EMITS',
+  sync_custody_memory: 'EMITS',
+  stabilize_environmental_controls: 'EMITS',
+};
+
+function canonicalizeName(value: string) {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
+function scoreSubtaskNameMatch(candidate: string, target: string) {
+  if (!candidate || !target) return 0;
+  if (candidate === target) return 100;
+  const candidateTokens = new Set(candidate.split('_').filter(Boolean));
+  const targetTokens = new Set(target.split('_').filter(Boolean));
+  let overlap = 0;
+  for (const token of candidateTokens) {
+    if (targetTokens.has(token)) overlap += 1;
+  }
+  if (candidate.includes(target) || target.includes(candidate)) return overlap + 3;
+  return overlap;
+}
+
+function resolveEmissionSubtaskName(
+  subtaskName: string | undefined,
+  availableSubtaskTypes: SubtaskType[]
+) {
+  if (!subtaskName) return undefined;
+  const availableByCanonical = new Map(
+    availableSubtaskTypes.map(st => [canonicalizeName(st.name), st.name] as const)
+  );
+  const canonical = canonicalizeName(subtaskName);
+  if (availableByCanonical.has(canonical)) {
+    return availableByCanonical.get(canonical);
+  }
+  const alias = EMISSION_SUBTASK_ALIASES[canonical];
+  if (alias && availableByCanonical.has(canonicalizeName(alias))) {
+    return alias;
+  }
+
+  let bestMatch: string | undefined;
+  let bestScore = 0;
+  for (const st of availableSubtaskTypes) {
+    const score = scoreSubtaskNameMatch(canonical, canonicalizeName(st.name));
+    if (score > bestScore) {
+      bestScore = score;
+      bestMatch = st.name;
+    }
+  }
+  return bestScore >= 2 ? bestMatch : undefined;
+}
+
+function repairRulesForPersistence(
+  rules: Rule[],
+  availableSubtaskTypes: SubtaskType[]
+) {
+  return rules.map(rule => ({
+    ...rule,
+    emissions: (rule.emissions || []).map(emission => {
+      const resolvedSubtaskName = resolveEmissionSubtaskName(emission.subtaskName, availableSubtaskTypes) || emission.subtaskName;
+      const relationshipType = emission.relationshipType
+        || (resolvedSubtaskName ? DEFAULT_RELATIONSHIP_BY_SUBTASK[resolvedSubtaskName] : undefined)
+        || 'EMITS';
+      return {
+        ...emission,
+        subtaskName: resolvedSubtaskName,
+        relationshipType,
+      };
+    }),
+  }));
+}
+
+function buildSnapshotNotes(params: {
+  freeformNotes?: string | null;
+  baseSnapshot?: Snapshot | null;
+  artifactFormat?: 'native' | 'wasm';
+  runId?: string;
+}) {
+  const payload: Record<string, any> = {
+    created_by: 'pkg-simulator',
+  };
+  if (params.freeformNotes) payload.notes = params.freeformNotes;
+  if (params.baseSnapshot?.id) payload.base_snapshot_id = params.baseSnapshot.id;
+  if (params.baseSnapshot?.version) payload.base_snapshot_version = params.baseSnapshot.version;
+  if (params.artifactFormat) payload.artifactFormat = params.artifactFormat;
+  if (params.runId) payload.run_id = params.runId;
+  return JSON.stringify(payload);
+}
+
 function pickBaseSnapshot(snaps: Snapshot[], baseId?: number | null) {
   if (baseId) {
     const found = snaps.find(s => s.id === baseId);
@@ -79,6 +248,14 @@ function pickBaseSnapshot(snaps: Snapshot[], baseId?: number | null) {
   }
   // Prefer active PROD
   return snaps.find(s => s.env === PkgEnv.PROD && s.isActive) || snaps[0] || null;
+}
+
+function ensureUniqueSnapshotVersion(version: string, snapshots: Snapshot[]) {
+  const trimmed = (version || '').trim();
+  const existing = new Set(snapshots.map(snapshot => snapshot.version));
+  if (trimmed && !existing.has(trimmed)) return trimmed;
+  const fallbackBase = trimmed || 'v' + Date.now();
+  return `${fallbackBase}-${Date.now()}`;
 }
 
 function matchesZoneMemory(memory: UnifiedMemoryItem, zone: string) {
@@ -252,7 +429,7 @@ export const ControlPlane: React.FC = () => {
 
   // State for the pipeline
   const [intent, setIntent] = useState(
-    'Vault releases are reaching the transfer corridor without dual approval. Tighten the release contract and quarantine route drift faster.'
+    'Upgrade the active INFRASTRUCTURE snapshot so vault-release flows require dual approval before entering the transfer corridor. Add explicit authz-graph edge manifests, deny protected corridor access by default, and quarantine route drift, stale telemetry, or missing lineage faster.'
   );
   
   // Zone-aware evolution
@@ -268,6 +445,10 @@ export const ControlPlane: React.FC = () => {
 
   const [draftSnapshot, setDraftSnapshot] = useState<Snapshot | null>(null);
   const [draftRules, setDraftRules] = useState<Rule[]>([]);
+  const [candidateSnapshotId, setCandidateSnapshotId] = useState<number | null>(null);
+  const [candidateSnapshotVersion, setCandidateSnapshotVersion] = useState<string | null>(null);
+  const [runtimeActiveSnapshotId, setRuntimeActiveSnapshotId] = useState<number | null>(null);
+  const [runtimeActiveSnapshotVersion, setRuntimeActiveSnapshotVersion] = useState<string | null>(null);
   const [validationResult, setValidationResult] = useState<ValidationRun | null>(null);
   const [deploymentPercent, setDeploymentPercent] = useState<number>(0);
 
@@ -384,6 +565,8 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
     setProposal(null);
     setDraftSnapshot(null);
     setDraftRules([]);
+    setCandidateSnapshotId(null);
+    setCandidateSnapshotVersion(null);
     setValidationResult(null);
     setDeploymentPercent(0);
     setAgentLogs([]);
@@ -396,21 +579,25 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
   useEffect(() => {
     const loadData = async () => {
       try {
-        const [snaps, ruls, sts, deps, events] = await Promise.all([
+        const [snaps, ruls, sts, deps, events, pkgStatus] = await Promise.all([
           getSnapshots(), 
           getRules(), 
           getSubtaskTypes(),
           getDeployments(false), // Get all deployments, not just active
           getRolloutEvents({ limit: 10 }).catch(() => []), // Optional: rollout events
+          seedcoreService.getPKGStatus().catch(() => null as any),
         ]);
         setSnapshots(snaps);
         setRules(ruls);
         setSubtaskTypes(sts || []);
         setDeployments(deps || []);
         setRolloutEvents(events || []);
+        setRuntimeActiveSnapshotId(pkgStatus?.snapshot_id ?? null);
+        setRuntimeActiveSnapshotVersion(pkgStatus?.version ?? pkgStatus?.snapshot_version ?? null);
 
         // pick default base snapshot id (active prod preferred)
-        const base = pickBaseSnapshot(snaps, null);
+        const runtimeBase = pkgStatus?.snapshot_id ? snaps.find(s => s.id === pkgStatus.snapshot_id) : null;
+        const base = runtimeBase || pickBaseSnapshot(snaps, null);
         setBaseSnapshotId(base?.id ?? null);
 
         // FIRST-TIME DETECTION: If no deployments exist, automatically select the first snapshot for deployment
@@ -458,8 +645,13 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
   }, [selectedZone, loadingData]);
 
   // Get active snapshot for deployment filtering
-  // Priority: 1) Active PROD snapshot from DB, 2) Selected snapshot for deployment, 3) Draft snapshot
+  // Priority: 1) Runtime-active snapshot from SeedCore, 2) Active PROD snapshot from DB, 3) Selected snapshot for deployment, 4) Draft snapshot
   const activeSnapshot = useMemo(() => {
+    if (runtimeActiveSnapshotId) {
+      const runtimeSnapshot = snapshots.find(s => s.id === runtimeActiveSnapshotId);
+      if (runtimeSnapshot) return runtimeSnapshot;
+    }
+
     const activeFromDb = snapshots.find(s => s.isActive && s.env === PkgEnv.PROD);
     if (activeFromDb) return activeFromDb;
     
@@ -469,7 +661,7 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
     }
     
     return draftSnapshot;
-  }, [snapshots, draftSnapshot, selectedSnapshotForDeployment]);
+  }, [snapshots, draftSnapshot, selectedSnapshotForDeployment, runtimeActiveSnapshotId]);
 
   const activeSnapshotId = activeSnapshot?.id;
 
@@ -655,6 +847,8 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
     setProposal(null);
     setDraftSnapshot(null);
     setDraftRules([]);
+    setCandidateSnapshotId(null);
+    setCandidateSnapshotVersion(null);
     setValidationResult(null);
     setDeploymentPercent(0);
 
@@ -676,12 +870,21 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
         checksum: '0'.repeat(64),
         sizeBytes: 0,
         createdAt: new Date().toISOString(),
-        notes: `Initial snapshot: ${intentForRun}`,
+        notes: buildSnapshotNotes({
+          freeformNotes: `Initial snapshot: ${intentForRun}`,
+          artifactFormat: 'native',
+          runId: newRunId,
+        }),
         artifactFormat: 'native'
       };
 
       // Generate evolution plan without a base (use empty version)
-      const prop = await generateEvolutionPlan(intentForRun, 'v0.0.0-initial', []);
+      const prop = await generateEvolutionPlan({
+        intent: intentForRun,
+        currentVersion: 'v0.0.0-initial',
+        contextFacts: [],
+        subtaskTypes: subtaskTypes,
+      });
       
       if (!prop) {
         addLog('EVOLUTION', 'Failed to generate initial proposal. Check API Key.', 'ERROR', newRunId);
@@ -696,11 +899,26 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
         baseSnapshotId: 0, // No base snapshot for initialization
         status: 'PENDING',
         generatedAt: new Date().toISOString(),
-        newVersion: prop.newVersion || initialVersion
+        newVersion: ensureUniqueSnapshotVersion(prop.newVersion || initialVersion, snapshots)
       };
 
       // Build snapshot from proposal with empty base rules (no existing rules to copy)
       const { snapshot, newRules } = buildSnapshotFromProposal(proposal, []);
+      const repairedInitialRules = repairRulesForPersistence(
+        newRules,
+        resolveUsableSubtaskTypes(subtaskTypes, proposal.baseSnapshotId)
+      );
+      const initialRuleIssues = collectRulePersistenceIssues(
+        repairedInitialRules,
+        resolveUsableSubtaskTypes(subtaskTypes, proposal.baseSnapshotId)
+      );
+      if (initialRuleIssues.length > 0) {
+        throw new Error(
+          `Initial proposal is incomplete and cannot be built: ${initialRuleIssues.slice(0, 3).join(' ')}${
+            initialRuleIssues.length > 3 ? ` (+${initialRuleIssues.length - 3} more)` : ''
+          }`
+        );
+      }
 
       // Save snapshot to database
       addLog('EVOLUTION', 'Saving initial snapshot to database...', 'INFO', newRunId);
@@ -709,7 +927,11 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
         env: snapshot.env,
         checksum: snapshot.checksum,
         sizeBytes: snapshot.sizeBytes,
-        notes: snapshot.notes,
+        notes: buildSnapshotNotes({
+          freeformNotes: snapshot.notes,
+          artifactFormat: 'native',
+          runId: newRunId,
+        }),
         isActive: false,
       });
 
@@ -726,9 +948,20 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
         sizeBytes: savedSnapshot.sizeBytes,
         createdAt: savedSnapshot.createdAt,
       };
+      setCandidateSnapshotId(savedSnapshot.id);
+      setCandidateSnapshotVersion(savedSnapshot.version);
+
+      const clonedInitialSubtasks = await cloneSubtaskTypes({
+        sourceSnapshotId: proposal.baseSnapshotId,
+        targetSnapshotId: savedSnapshot.id,
+        existingSubtaskTypes: subtaskTypes,
+      });
+      if (clonedInitialSubtasks.length > 0) {
+        setSubtaskTypes(prev => [...prev, ...clonedInitialSubtasks]);
+      }
 
       // Attach saved snapshot id to all rules
-      const rulesForDb = newRules.map(r => ({
+      const rulesForDb = repairedInitialRules.map(r => ({
         ...r,
         snapshotId: savedSnapshot.id,
       }));
@@ -745,6 +978,7 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
             priority: r.priority,
             engine: r.engine,
             ruleSource,
+            metadata: r.metadata ?? null,
             conditions: r.conditions || [],
             emissions: (r.emissions || []).map(e => ({
               subtaskTypeId: e.subtaskTypeId || '',
@@ -786,6 +1020,8 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
     setProposal(null);
     setDraftSnapshot(null);
     setDraftRules([]);
+    setCandidateSnapshotId(null);
+    setCandidateSnapshotVersion(null);
     setValidationResult(null);
     setDeploymentPercent(0);
 
@@ -808,12 +1044,16 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
     try {
       // Zone-aware evolution: Include zone context in intent
       const zoneContextualIntent = `[Zone: ${selectedZone}] ${intentForRun}`;
-      const prop = await proposeEvolution(zoneContextualIntent, base);
+      const prop = await proposeEvolution(zoneContextualIntent, base, {
+        existingRules: rules.filter(rule => rule.snapshotId === base.id),
+        subtaskTypes: resolveUsableSubtaskTypes(subtaskTypes, base.id),
+      });
 
       // ignore stale results
       if (pipelineIdRef.current !== newRunId) return;
 
       if (prop) {
+        prop.newVersion = ensureUniqueSnapshotVersion(prop.newVersion, snapshots);
         setProposal(prop);
         addLog('EVOLUTION', `Generated proposal: ${prop.newVersion} (zone=${selectedZone})`, 'SUCCESS', newRunId);
       } else {
@@ -831,11 +1071,22 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
     if (!proposal) return;
 
     const runId = pipelineIdRef.current;
+    const buildBaseSnapshot = pickBaseSnapshot(snapshots, proposal.baseSnapshotId ?? baseSnapshotId);
     setIsBuilding(true);
     addLog('EVOLUTION', `Run ${runId}: building draft snapshot (Native)...`, 'INFO', runId);
 
     try {
       const { snapshot, newRules } = buildSnapshotFromProposal(proposal, rules);
+      const baseSnapshotSubtaskTypes = resolveUsableSubtaskTypes(subtaskTypes, proposal.baseSnapshotId);
+      const repairedRules = repairRulesForPersistence(newRules, baseSnapshotSubtaskTypes);
+      const preflightIssues = collectRulePersistenceIssues(repairedRules, baseSnapshotSubtaskTypes);
+      if (preflightIssues.length > 0) {
+        throw new Error(
+          `Generated proposal is incomplete and cannot be built: ${preflightIssues.slice(0, 3).join(' ')}${
+            preflightIssues.length > 3 ? ` (+${preflightIssues.length - 3} more)` : ''
+          }`
+        );
+      }
 
       // Save snapshot to database
       addLog('EVOLUTION', 'Saving snapshot to database...', 'INFO', runId);
@@ -844,7 +1095,12 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
         env: snapshot.env,
         checksum: snapshot.checksum,
         sizeBytes: snapshot.sizeBytes,
-        notes: snapshot.notes,
+        notes: buildSnapshotNotes({
+          freeformNotes: snapshot.notes,
+          baseSnapshot: buildBaseSnapshot,
+          artifactFormat: 'native',
+          runId,
+        }),
         isActive: false,
       });
 
@@ -862,23 +1118,27 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
         createdAt: savedSnapshot.createdAt,
         // keep artifactFormat if buildSnapshotFromProposal sets it
       };
+      setCandidateSnapshotId(savedSnapshot.id);
+      setCandidateSnapshotVersion(savedSnapshot.version);
+
+      const clonedSubtasks = await cloneSubtaskTypes({
+        sourceSnapshotId: proposal.baseSnapshotId,
+        targetSnapshotId: savedSnapshot.id,
+        existingSubtaskTypes: subtaskTypes,
+      });
+      if (clonedSubtasks.length > 0) {
+        setSubtaskTypes(prev => [...prev, ...clonedSubtasks]);
+      }
 
       // attach saved snapshot id to all rules
-      const rulesForDb = newRules.map(r => ({
+      const rulesForDb = repairedRules.map(r => ({
         ...r,
         snapshotId: savedSnapshot.id,
       }));
 
-      setDraftSnapshot(snapshotWithDbId);
-      setDraftRules(rulesForDb);
-      setValidationResult(null);
-
       // OPTIONAL but recommended: persist rules now, with stable ruleSource derived from runIntent
       if (persistRulesOnBuild) {
         addLog('EVOLUTION', `Persisting ${rulesForDb.length} rule(s) into DB...`, 'INFO', runId);
-
-        // Get subtask types for the new snapshot (from base snapshot)
-        const baseSnapshotSubtaskTypes = subtaskTypes.filter(st => st.snapshotId === proposal.baseSnapshotId);
 
         for (const r of rulesForDb) {
           const ruleSource = ruleSourceFromIntentOrStructure(runIntent, r);
@@ -916,6 +1176,7 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
             priority: r.priority,
             engine: r.engine,
             ruleSource, // ✅ prevents prompt mismatch / empty source
+            metadata: r.metadata ?? null,
             conditions: r.conditions.map(c => ({
               conditionType: c.conditionType,
               conditionKey: c.conditionKey,
@@ -931,6 +1192,10 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
         addLog('EVOLUTION', 'Rules kept in-memory (persistRulesOnBuild=false).', 'WARN', runId);
       }
 
+      setDraftSnapshot(snapshotWithDbId);
+      setDraftRules(rulesForDb);
+      setValidationResult(null);
+
       addLog(
         'EVOLUTION',
         `Snapshot ${savedSnapshot.version} built in NATIVE format. Size: ${savedSnapshot.sizeBytes} bytes.`,
@@ -938,6 +1203,10 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
         runId
       );
     } catch (error: any) {
+      setDraftSnapshot(null);
+      setDraftRules([]);
+      setCandidateSnapshotId(null);
+      setCandidateSnapshotVersion(null);
       addLog('EVOLUTION', `Build failed: ${error?.message || String(error)}`, 'ERROR', runId);
     } finally {
       setIsBuilding(false);
@@ -1278,6 +1547,40 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
         addLog('DEPLOYMENT', `Run ${runId}: full rollout complete. Snapshot ${snapshotToDeploy.version} deployed to PROD.`, 'SUCCESS', runId);
       }
 
+      let runtimeConfirmed = false;
+      try {
+        await seedcoreService.reloadPKG();
+        const pkgStatus = await seedcoreService.getPKGStatus();
+        const runtimeId = pkgStatus?.snapshot_id ?? null;
+        const runtimeVersion = pkgStatus?.version ?? pkgStatus?.snapshot_version ?? null;
+        setRuntimeActiveSnapshotId(runtimeId);
+        setRuntimeActiveSnapshotVersion(runtimeVersion);
+        runtimeConfirmed = runtimeId === finalSnapshotToDeploy.id;
+
+        if (runtimeConfirmed) {
+          addLog(
+            'DEPLOYMENT',
+            `Run ${runId}: runtime confirmed active on snapshot ${runtimeVersion || finalSnapshotToDeploy.version} (id=${runtimeId}).`,
+            'SUCCESS',
+            runId
+          );
+        } else {
+          addLog(
+            'DEPLOYMENT',
+            `Run ${runId}: deployment persisted, but runtime is still serving snapshot id=${runtimeId ?? 'unknown'}${runtimeVersion ? ` (${runtimeVersion})` : ''}.`,
+            'ERROR',
+            runId
+          );
+        }
+      } catch (runtimeError: any) {
+        addLog(
+          'DEPLOYMENT',
+          `Run ${runId}: deployment persisted, but runtime confirmation failed: ${runtimeError?.message || String(runtimeError)}`,
+          'ERROR',
+          runId
+        );
+      }
+
       // Reload deployments and snapshots to show the newly created deployment and updated active snapshot
       try {
         const [snaps, deps, events] = await Promise.all([
@@ -1290,8 +1593,10 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
         setRolloutEvents(events || []);
         
         // Update activeSnapshotId if the deployed snapshot became active
-        const newActiveSnapshot = snaps.find(s => s.isActive && s.env === PkgEnv.PROD);
-        if (newActiveSnapshot && newActiveSnapshot.id === snapshotToDeploy.id) {
+        const newActiveSnapshot = runtimeConfirmed
+          ? snaps.find(s => s.id === finalSnapshotToDeploy.id)
+          : snaps.find(s => s.isActive && s.env === PkgEnv.PROD);
+        if (runtimeConfirmed && newActiveSnapshot && newActiveSnapshot.id === finalSnapshotToDeploy.id) {
           // Clear selected snapshot since it's now active
           setSelectedSnapshotForDeployment(null);
         }
@@ -1357,6 +1662,11 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
               </div>
             </div>
           )}
+          {runtimeActiveSnapshotId && (
+            <div className="text-xs text-emerald-700">
+              Runtime Active: <span className="font-mono">{runtimeActiveSnapshotVersion || `id=${runtimeActiveSnapshotId}`}</span>
+            </div>
+          )}
         </div>
 
         <div className="flex items-center gap-3">
@@ -1398,12 +1708,12 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
           <div className="p-4 flex-1 overflow-y-auto space-y-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                Human Intent / Incident Log
+                Policy Upgrade Intent / Incident Log
                 <span className="ml-2 text-xs font-normal text-gray-500">(Zone: {selectedZone})</span>
               </label>
               <div className="flex items-center justify-between mb-2">
                 <div className="text-xs text-gray-500">
-                  Latest SeedCore app-scoped tracking events can auto-populate this field for zone-aware evolution.
+                  Describe the failure, the target controls, and the graph/runtime behavior you want the next snapshot to enforce.
                 </div>
                 <button
                   type="button"
@@ -1419,13 +1729,16 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
                 className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm border p-3 h-32"
                 value={intent}
                 onChange={(e) => setIntent(e.target.value)}
-                placeholder={`Describe what needs to change for ${selectedZone} zone...`}
+                placeholder={`For ${selectedZone}, describe: incident, affected assets/routes, required deny or quarantine behavior, approvals/evidence needed, and whether authz graph manifests must be added.`}
               />
+              <div className="mt-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                Strong prompts usually include: scope and zone, actors and resources, the unsafe path to block, the exact allow/deny/quarantine behavior to add, and any graph-manifest or audit expectations.
+              </div>
               <div className="text-xs text-gray-500 mt-2">
                 Run intent snapshot: <span className="font-mono">{runIntent ? safeQuote(runIntent, 80) : '(none yet)'}</span>
               </div>
               <div className="text-xs text-amber-600 mt-1">
-                ℹ️ Zone-aware: Evolution Agent will pull zone-specific facts for {selectedZone} before proposing changes.
+                ℹ️ Zone-aware: Evolution Agent will pull zone-specific facts for {selectedZone} and try to preserve PDP parity, audit receipts, and deployability in the next snapshot.
               </div>
             </div>
             
@@ -1472,7 +1785,7 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
                 <h4 className="font-bold text-gray-900">{proposal.newVersion}</h4>
                 <p className="text-sm text-gray-600 mt-1 mb-3">{proposal.reason}</p>
                 <div className="space-y-2">
-                   {proposal.changes.map((c, i) => (
+                   {(proposal.changes || []).map((c, i) => (
                      <div key={i} className="text-xs bg-white p-2 rounded border border-indigo-100">
                        <span className={`font-bold mr-2 ${c.action === 'DELETE' ? 'text-red-600' : 'text-green-600'}`}>{c.action}</span>
                        <span className="text-gray-500">{c.rationale}</span>
@@ -1493,6 +1806,8 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
                       setProposal(null);
                       setDraftSnapshot(null);
                       setDraftRules([]);
+                      setCandidateSnapshotId(null);
+                      setCandidateSnapshotVersion(null);
                       setValidationResult(null);
                       setDeploymentPercent(0);
                       addLog('EVOLUTION', 'Proposal rejected; pipeline cleared (run intent preserved).', 'WARN');
@@ -1532,7 +1847,10 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
                     <div className="text-xs font-bold uppercase mb-2">
                       {(draftSnapshot.artifactFormat === 'native' || !draftSnapshot.artifactFormat) ? 'NATIVE SNAPSHOT' : 'WASM SNAPSHOT'}
                     </div>
-                    <div className="font-mono text-lg font-bold text-gray-900">{draftSnapshot.version}</div>
+                    <div className="font-mono text-lg font-bold text-gray-900">{candidateSnapshotVersion || draftSnapshot.version}</div>
+                    <div className="text-xs text-gray-600 mt-2">
+                      Candidate snapshot id={candidateSnapshotId || draftSnapshot.id}
+                    </div>
                     <div className="text-xs text-gray-600 mt-2">
                       Size: {draftSnapshot.sizeBytes.toLocaleString()} bytes
                     </div>
@@ -1726,7 +2044,8 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
                <div className="flex-1 flex flex-col items-center justify-center space-y-4">
                   <div className="bg-emerald-50 border border-emerald-100 p-4 rounded-lg text-center w-full">
                     <div className="text-xs font-bold text-emerald-800 uppercase mb-1">WASM SNAPSHOT READY</div>
-                    <div className="font-mono text-sm font-bold text-gray-900">{draftSnapshot.version}</div>
+                    <div className="font-mono text-sm font-bold text-gray-900">{candidateSnapshotVersion || draftSnapshot.version}</div>
+                    <div className="text-xs text-gray-500 mt-1">Candidate snapshot id={candidateSnapshotId || draftSnapshot.id}</div>
                     <div className="text-xs text-emerald-600 mt-2">
                       Size: {draftSnapshot.sizeBytes.toLocaleString()} bytes (compressed)
                     </div>
@@ -1883,7 +2202,7 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
                           <CheckCircle className="text-blue-500"/>
                        </div>
                        <div className="text-sm text-gray-600 mb-4">
-                          Ready to deploy: <span className="font-mono font-semibold">{draftSnapshot?.version}</span>
+                          Ready to deploy: <span className="font-mono font-semibold">{candidateSnapshotVersion || draftSnapshot?.version}</span> <span className="text-xs text-gray-500">(id={candidateSnapshotId || draftSnapshot?.id})</span>
                        </div>
                        <div className="space-y-3">
                           {/* Deployment Target Selection for existing snapshot */}
@@ -1945,7 +2264,8 @@ Requested policy evolution: keep current controls, but add log watchers, anomaly
                <div className="space-y-6">
                   <div className="text-center">
                      <div className="text-sm text-gray-500 mb-1">Target Version</div>
-                     <div className="text-2xl font-bold text-indigo-600">{draftSnapshot?.version}</div>
+                     <div className="text-2xl font-bold text-indigo-600">{candidateSnapshotVersion || draftSnapshot?.version}</div>
+                     <div className="text-xs text-gray-500 mt-1 font-mono">snapshot id={candidateSnapshotId || draftSnapshot?.id}</div>
                   </div>
 
                   <div className="relative pt-1">

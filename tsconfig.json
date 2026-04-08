@@ -17,5 +17,6 @@
       "@/*": ["./*"]
     }
   },
-  "include": ["src", "services/seedDataService.ts"]
+  "include": ["**/*.ts", "**/*.tsx"],
+  "exclude": ["node_modules", "dist"]
 }

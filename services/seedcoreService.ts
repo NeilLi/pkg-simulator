@@ -250,6 +250,286 @@ export interface TrackingEventFilters {
   offset?: number;
 }
 
+export interface OwnerPolicyRecord {
+  owner_id: string;
+  policy_id: string;
+  policy_version: string;
+  status: "ACTIVE" | "SUPERSEDED" | "REVOKED";
+  default_disposition: "ALLOW" | "DENY" | "ESCALATE";
+  allowed_categories: string[];
+  denied_categories: string[];
+  spend_controls: Array<{
+    scope: string;
+    currency: string;
+    per_transaction_limit?: number | null;
+    daily_limit?: number | null;
+    monthly_limit?: number | null;
+    step_up_threshold?: number | null;
+  }>;
+  merchant_rules: Array<{
+    merchant: string;
+    marketplace?: string | null;
+    disposition: "ALLOW" | "DENY" | "ESCALATE";
+    required_provenance?: string | null;
+    max_amount?: number | null;
+  }>;
+  publishing_rules: Array<{
+    channel: string;
+    content_type: string;
+    disposition: "ALLOW" | "DENY" | "ESCALATE";
+    requires_review: boolean;
+    required_approvals: number;
+  }>;
+  approval_chains: Array<{
+    action_family: string;
+    threshold_type: string;
+    threshold_value: number;
+    required_approval_count: number;
+    approver_roles: string[];
+    step_up_on_risk_score?: number | null;
+  }>;
+  delegated_assistants: Array<{
+    assistant_id: string;
+    authority_level: "observer" | "contributor" | "signer";
+    allowed_actions: string[];
+  }>;
+  updated_at?: string;
+  updated_by?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface TrustPreferencesRecord {
+  owner_id: string;
+  trust_version: string;
+  status: "ACTIVE" | "SUPERSEDED" | "REVOKED";
+  max_risk_score?: number | null;
+  merchant_allowlist: string[];
+  required_provenance_level?: string | null;
+  required_evidence_modalities: string[];
+  high_value_step_up_threshold_usd?: number | null;
+  updated_at?: string;
+  updated_by?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface TrustPreferencesUpsertRequest {
+  owner_id: string;
+  trust_version?: string;
+  status?: "ACTIVE" | "SUPERSEDED" | "REVOKED";
+  max_risk_score?: number | null;
+  merchant_allowlist?: string[];
+  required_provenance_level?: string | null;
+  required_evidence_modalities?: string[];
+  high_value_step_up_threshold_usd?: number | null;
+  updated_by?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface OwnerPolicyUpsertRequest {
+  owner_id: string;
+  policy_id?: string;
+  policy_version?: string;
+  status?: "ACTIVE" | "SUPERSEDED" | "REVOKED";
+  default_disposition?: "ALLOW" | "DENY" | "ESCALATE";
+  allowed_categories?: string[];
+  denied_categories?: string[];
+  spend_controls?: Array<{
+    scope?: string;
+    currency?: string;
+    per_transaction_limit?: number | null;
+    daily_limit?: number | null;
+    monthly_limit?: number | null;
+    step_up_threshold?: number | null;
+  }>;
+  merchant_rules?: Array<{
+    merchant: string;
+    marketplace?: string | null;
+    disposition?: "ALLOW" | "DENY" | "ESCALATE";
+    required_provenance?: string | null;
+    max_amount?: number | null;
+  }>;
+  publishing_rules?: Array<{
+    channel: string;
+    content_type: string;
+    disposition?: "ALLOW" | "DENY" | "ESCALATE";
+    requires_review?: boolean;
+    required_approvals?: number;
+  }>;
+  approval_chains?: Array<{
+    action_family: string;
+    threshold_type: string;
+    threshold_value: number;
+    required_approval_count?: number;
+    approver_roles?: string[];
+    step_up_on_risk_score?: number | null;
+  }>;
+  delegated_assistants?: Array<{
+    assistant_id: string;
+    authority_level?: "observer" | "contributor" | "signer";
+    allowed_actions?: string[];
+  }>;
+  updated_by?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface OwnerContextPreflightRequest {
+  owner_id: string;
+  assistant_id?: string;
+  delegation_id?: string;
+  merchant_ref?: string;
+  declared_value_usd?: number;
+  required_modalities?: string[];
+  available_modalities?: string[];
+  observed_provenance_level?: string;
+  risk_score?: number;
+}
+
+export interface OwnerContextPreflightResponse {
+  ok: boolean;
+  owner_id: string;
+  assistant_id?: string | null;
+  owner_context_hash: string;
+  owner_context_ref: Record<string, unknown>;
+  delegation_check: {
+    checked: boolean;
+    delegation_id?: string | null;
+    valid: boolean | null;
+    issues: string[];
+    record?: Record<string, unknown>;
+  };
+  predicted_policy_signals: {
+    trust_gap_codes: string[];
+    reason_codes: string[];
+    missing_modalities: string[];
+  };
+  inputs: {
+    merchant_ref?: string | null;
+    declared_value_usd?: number | null;
+    observed_provenance_level?: string | null;
+    risk_score?: number | null;
+    required_modalities: string[];
+    available_modalities: string[];
+  };
+  warnings: string[];
+}
+
+export interface PolicyScenarioCasePayload {
+  scenario_id: string;
+  label: string;
+  request: {
+    contract_version: "seedcore.agent_action_gateway.v1";
+    request_id: string;
+    requested_at: string;
+    idempotency_key: string;
+    policy_snapshot_ref?: string;
+    principal: {
+      agent_id: string;
+      role_profile: string;
+      session_token?: string;
+      actor_token?: string;
+      owner_id: string;
+      delegation_ref: string;
+      organization_ref?: string;
+      hardware_fingerprint: {
+        fingerprint_id: string;
+        node_id?: string;
+        public_key_fingerprint: string;
+        attestation_type?: string;
+        key_ref?: string;
+        hardware_tpm_hash?: string;
+      };
+    };
+    workflow: {
+      type: "restricted_custody_transfer";
+      action_type: string;
+      valid_until: string;
+    };
+    asset: {
+      asset_id: string;
+      lot_id?: string;
+      product_ref?: string;
+      quote_ref?: string;
+      from_custodian_ref?: string;
+      to_custodian_ref?: string;
+      from_zone?: string;
+      to_zone?: string;
+      provenance_hash: string;
+      declared_value_usd?: number;
+    };
+    approval: {
+      approval_envelope_id: string;
+      expected_envelope_version?: string;
+    };
+    authority_scope: {
+      scope_id: string;
+      asset_ref: string;
+      product_ref?: string;
+      facility_ref?: string;
+      expected_from_zone?: string;
+      expected_to_zone?: string;
+      expected_coordinate_ref?: string;
+      max_radius_meters?: number;
+    };
+    telemetry: {
+      observed_at: string;
+      freshness_seconds?: number;
+      max_allowed_age_seconds?: number;
+      current_zone?: string;
+      current_coordinate_ref?: string;
+      evidence_refs: string[];
+    };
+    forensic_context?: {
+      reason_trace_ref?: string;
+      fingerprint_components?: {
+        economic_hash?: string;
+        physical_presence_hash?: string;
+        reasoning_hash?: string;
+        actuator_hash?: string;
+      };
+    };
+    security_contract: {
+      hash: string;
+      version: string;
+    };
+    options?: {
+      debug?: boolean;
+      no_execute?: boolean;
+    };
+  };
+}
+
+export interface EvaluatePolicyScenarioPackRequest {
+  owner_id: string;
+  policy_version: string;
+  scenarios: PolicyScenarioCasePayload[];
+}
+
+export interface EvaluatePolicyScenarioPackResponse {
+  owner_id: string;
+  policy_version: string;
+  summary: {
+    total: number;
+    allowed: number;
+    denied: number;
+    escalated: number;
+    errors: number;
+  };
+  results: Array<{
+    scenario_id: string;
+    label: string;
+    decision: "ALLOW" | "DENY" | "ESCALATE" | "ERROR";
+    reason_code: string;
+    trust_gaps: string[];
+    required_approvals: string[];
+    obligations: Array<Record<string, unknown>>;
+    governed_receipt_ref?: string | null;
+    error?: {
+      status_code?: number | null;
+      detail?: Record<string, unknown>;
+    };
+  }>;
+}
+
 export interface MultimodalVision {
   source: "vision";
   media_uri: string;
@@ -332,6 +612,7 @@ class SeedCoreService {
         h: n * 60 * 60 * 1000,
         d: n * 24 * 60 * 60 * 1000,
       }[unit];
+      if (deltaMs === undefined) return null;
       return new Date(now.getTime() - deltaMs);
     }
     
@@ -1379,6 +1660,44 @@ class SeedCoreService {
       }
       throw new Error(`Unknown error comparing PKG snapshots: ${String(error)}`);
     }
+  }
+
+  async getTrustPreferences(ownerId: string): Promise<TrustPreferencesRecord | null> {
+    try {
+      return await this.request<TrustPreferencesRecord>("GET", `/trust-preferences/${encodeURIComponent(ownerId)}`);
+    } catch (error: any) {
+      if (error?.status === 404) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  async upsertTrustPreferences(payload: TrustPreferencesUpsertRequest): Promise<TrustPreferencesRecord> {
+    return this.request<TrustPreferencesRecord>("POST", "/trust-preferences", payload);
+  }
+
+  async getOwnerPolicy(ownerId: string): Promise<OwnerPolicyRecord | null> {
+    try {
+      return await this.request<OwnerPolicyRecord>("GET", `/owner-policies/${encodeURIComponent(ownerId)}`);
+    } catch (error: any) {
+      if (error?.status === 404) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  async upsertOwnerPolicy(payload: OwnerPolicyUpsertRequest): Promise<OwnerPolicyRecord> {
+    return this.request<OwnerPolicyRecord>("POST", "/owner-policies", payload);
+  }
+
+  async preflightOwnerContext(payload: OwnerContextPreflightRequest): Promise<OwnerContextPreflightResponse> {
+    return this.request<OwnerContextPreflightResponse>("POST", "/owner-context/preflight", payload);
+  }
+
+  async evaluatePolicyScenarioPack(payload: EvaluatePolicyScenarioPackRequest): Promise<EvaluatePolicyScenarioPackResponse> {
+    return this.request<EvaluatePolicyScenarioPackResponse>("POST", "/policy-assistant/scenario-pack/evaluate", payload);
   }
 }
 

@@ -15,6 +15,7 @@ export enum AppPage {
   SEED_DATA = 'seed-data',
 
   // Authoring Plane - "What should happen?"
+  POLICY_ASSISTANT = 'policy-assistant',
   POLICY_STUDIO = 'policy-studio',
 
   // Verification Plane - "What will happen?"
@@ -56,6 +57,7 @@ export const FEATURE_SEQUENCE: AppPage[] = [
   
   // Creation (Simulator/Mother) - Gemini as architect
   AppPage.SEED_DATA,
+  AppPage.POLICY_ASSISTANT,
   AppPage.POLICY_STUDIO,
   
   // Operations (Cockpit) - Edge: perception meets policy
@@ -82,6 +84,7 @@ export const FEATURE_GROUPS: Record<AppPage, FeatureGroup> = {
   
   // Creation (Simulator/Mother)
   [AppPage.SEED_DATA]: FeatureGroup.CREATION,
+  [AppPage.POLICY_ASSISTANT]: FeatureGroup.CREATION,
   [AppPage.POLICY_STUDIO]: FeatureGroup.CREATION,
   
   // Operations (Cockpit)
@@ -136,6 +139,10 @@ export const PAGE_METADATA: Partial<Record<AppPage, PageMetadata>> = {
   [AppPage.POLICY_STUDIO]: {
     label: 'Policy Studio',
     description: 'Create and evolve runtime policy artifacts with AI-assisted generation',
+  },
+  [AppPage.POLICY_ASSISTANT]: {
+    label: 'Policy Assistant',
+    description: 'Guided policy setup for non-experts with preflight and scenario simulation before commit',
   },
   [AppPage.SIMULATOR]: {
     label: 'Simulator',

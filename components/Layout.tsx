@@ -1,5 +1,5 @@
 import React from 'react';
-import { Activity, Database, GitBranch, Play, LayoutDashboard, BrainCircuit, Cpu, Sparkles } from 'lucide-react';
+import { Activity, Database, GitBranch, Play, LayoutDashboard, BrainCircuit, Cpu, Sparkles, Shield } from 'lucide-react';
 import { AppPage, FEATURE_SEQUENCE, PAGE_METADATA, FEATURE_GROUPS, GROUP_LABELS, FeatureGroup } from '../appPages';
 
 interface LayoutProps {
@@ -14,6 +14,7 @@ export const Layout: React.FC<LayoutProps> = ({ children, activePage, onNavigate
     [AppPage.DASHBOARD]: LayoutDashboard,
     [AppPage.CONTROL_PLANE]: Cpu,
     [AppPage.POLICY_STUDIO]: GitBranch,
+    [AppPage.POLICY_ASSISTANT]: Shield,
     [AppPage.SIMULATOR]: Play,
     [AppPage.KNOWLEDGE]: Database,
     [AppPage.MEMORY]: BrainCircuit,

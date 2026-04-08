@@ -139,6 +139,7 @@ export const PolicyAssistantPage: React.FC = () => {
       <div className="bg-white border border-gray-200 rounded-lg p-4">
         <h2 className="text-lg font-semibold">Policy Assistant</h2>
         <p className="text-sm text-gray-600 mt-1">Guided policy setup for non-experts before Policy Studio authoring.</p>
+        <p className="text-xs text-gray-500 mt-2">Need direct rule/snapshot editing? Open <span className="font-medium">Policy Studio (Advanced)</span> from the sidebar.</p>
       </div>
 
       <div className="bg-white border border-gray-200 rounded-lg p-4">

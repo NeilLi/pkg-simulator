@@ -58,7 +58,7 @@ The database proxy URL defaults to `http://localhost:3011`.
 - `Initialization`: bootstrap the governed runtime baseline
 - `Knowledge Graph`: inspect facts, zones, systems, and custody relationships
 - `Unified Memory`: inspect event, knowledge, and playback memory
-- `Mission Seeds`: generate governed requests and runtime incident scenarios
+- `Mission Seeds (Legacy Local)`: local db-proxy seeded mission generator retained for compatibility; not on the main SeedCore-aligned flow
 - `Policy Studio`: author facts and rules for PKG snapshots
 - `Simulator`: dry-run tags, signals, and emissions before deployment
 - `Governance Cockpit`: monitor perception, temporal validity, and digital twin output

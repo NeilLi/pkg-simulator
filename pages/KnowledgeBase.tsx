@@ -1,8 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { getFacts, getUnifiedMemory, clearCache } from '../mockData';
-import { fetchSnapshots } from '../services/database';
+import { knowledgeMemoryService } from '../services/knowledgeMemoryService';
 import {
-  Clock,
   Brain,
   Globe,
   Zap,
@@ -15,7 +13,7 @@ import {
   ChevronRight,
   GitBranch,
 } from 'lucide-react';
-import { Fact, UnifiedMemoryItem, Snapshot } from '../types';
+import { Fact, UnifiedMemoryItem } from '../types';
 
 interface KnowledgeBaseProps {
   view: string; // 'knowledge' | 'memory'
@@ -29,7 +27,12 @@ interface EnhancedFact extends Fact {
 
 interface EnhancedMemoryItem extends UnifiedMemoryItem {
   snapshotId?: number;
-  confidenceScore?: number;
+}
+
+interface WorldOption {
+  id: number;
+  label: string;
+  isActive: boolean;
 }
 
 type MemoryTier = UnifiedMemoryItem['memoryTier']; // 'event_working' | 'knowledge_base' | 'world_memory'
@@ -85,7 +88,7 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
   // Data
   const [facts, setFacts] = useState<EnhancedFact[]>([]);
   const [unifiedMemory, setUnifiedMemory] = useState<EnhancedMemoryItem[]>([]);
-  const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
+  const [worldOptions, setWorldOptions] = useState<WorldOption[]>([]);
 
   // UX State
   const [loading, setLoading] = useState(true);
@@ -120,15 +123,12 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
       setError(null);
       if (!force) setLoading(true);
 
-      // Optional: if you use caching in mockData, this ensures fresh data
-      // (safe even if it does nothing)
-      if (force) clearCache?.();
-
-      const [fcts, mem, snaps] = await Promise.all([
-        getFacts(),
-        isMemory ? getUnifiedMemory(500) : Promise.resolve([]),
-        fetchSnapshots().catch(() => []), // Gracefully handle if snapshots endpoint fails
+      const [fcts, mem, activeSnapshotInfo] = await Promise.all([
+        knowledgeMemoryService.getFacts(),
+        isMemory ? knowledgeMemoryService.getUnifiedMemory(500) : Promise.resolve([]),
+        knowledgeMemoryService.getActiveSnapshotInfo(),
       ]);
+      const activeSnapshotId = activeSnapshotInfo.snapshotId;
 
       // Stable default sort: newest first (facts by validFrom/createdBy not guaranteed, so use validFrom fallback)
       const sortedFacts = [...fcts].sort((a, b) => {
@@ -139,14 +139,50 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
 
       setFacts(sortedFacts as EnhancedFact[]);
       setUnifiedMemory(isMemory ? (mem as EnhancedMemoryItem[]) : []);
-      setSnapshots(snaps);
-
-      // Set active snapshot to active snapshot ID (default to active snapshot instead of 'all')
-      if (snaps.length > 0) {
-        const activeSnap = snaps.find((s: Snapshot) => s.isActive);
-        if (activeSnap) {
-          setActiveSnapshot(activeSnap.id || 'all');
+      
+      const knownWorlds = new Map<number, WorldOption>();
+      const registerWorld = (snapshotId?: number, labelHint?: string) => {
+        if (typeof snapshotId !== 'number') return;
+        const existing = knownWorlds.get(snapshotId);
+        const isActive = activeSnapshotId === snapshotId;
+        const label = labelHint?.trim() || `snapshot-${snapshotId}`;
+        if (!existing) {
+          knownWorlds.set(snapshotId, { id: snapshotId, label, isActive });
+          return;
         }
+        if (existing.label.startsWith('snapshot-') && !label.startsWith('snapshot-')) {
+          existing.label = label;
+        }
+        existing.isActive = existing.isActive || isActive;
+      };
+
+      for (const fact of fcts) {
+        registerWorld(
+          fact.snapshotId,
+          (fact.metaData as any)?.snapshot_version || (fact.metaData as any)?.snapshotVersion,
+        );
+      }
+
+      for (const memory of mem as EnhancedMemoryItem[]) {
+        registerWorld(
+          memory.snapshotId,
+          (memory.metadata as any)?.snapshot_version || (memory.metadata as any)?.snapshotVersion,
+        );
+      }
+
+      if (typeof activeSnapshotId === 'number') {
+        registerWorld(
+          activeSnapshotId,
+          activeSnapshotInfo.snapshotVersion || `snapshot-${activeSnapshotId}`,
+        );
+      }
+
+      const worlds = Array.from(knownWorlds.values()).sort((a, b) => b.id - a.id);
+      setWorldOptions(worlds);
+      if (typeof activeSnapshotId === 'number') {
+        setActiveSnapshot(activeSnapshotId);
+      } else if (worlds.length > 0 && activeSnapshot === 'all') {
+        setActiveSnapshot(worlds[0].id);
       }
 
       // Reset paging when switching view / refresh
@@ -164,6 +200,14 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
     loadData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isMemory]);
+
+  const worldLabelById = useMemo(() => {
+    const map = new Map<number, string>();
+    for (const world of worldOptions) {
+      map.set(world.id, world.label);
+    }
+    return map;
+  }, [worldOptions]);
 
   const memoryTierCounts = useMemo(() => {
     const base = { event_working: 0, knowledge_base: 0, world_memory: 0 };
@@ -266,7 +310,7 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
         </h3>
         <p className="mt-1 max-w-2xl text-sm text-gray-500">
           {isMemory
-            ? 'Unified memory feed across tiers. Tier indicates where memory lives; status shows task lifecycle when available.'
+            ? 'Unified memory feed from SeedCore tracking events, tasks, and fact-derived world memory.'
             : 'Governed facts with temporal validity windows used for policy evaluation.'}
         </p>
       </div>
@@ -285,9 +329,9 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
             className="px-3 py-1.5 border border-indigo-200 bg-indigo-50 text-indigo-700 rounded-md text-xs font-mono focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
           >
             <option value="all">Global Memory (Soup)</option>
-            {snapshots.map((snap) => (
-              <option key={snap.id} value={snap.id}>
-                {snap.version} ({snap.env})
+            {worldOptions.map((world) => (
+              <option key={world.id} value={world.id}>
+                {world.label}{world.isActive ? ' (active)' : ''}
               </option>
             ))}
           </select>
@@ -519,7 +563,7 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
                 {(pageRows as EnhancedMemoryItem[]).map((mem) => {
-                  const snapshot = mem.snapshotId ? snapshots.find(s => s.id === mem.snapshotId) : null;
+                  const snapshotLabel = mem.snapshotId ? worldLabelById.get(mem.snapshotId) : null;
                   return (
                     <tr key={mem.id} className="hover:bg-gray-50">
                       <td className="px-6 py-4 whitespace-nowrap">{tierBadge(mem.memoryTier)}</td>
@@ -529,10 +573,10 @@ export const KnowledgeBase: React.FC<KnowledgeBaseProps> = ({ view }) => {
                         {mem.content}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                        {snapshot ? (
+                        {snapshotLabel ? (
                           <span className="inline-flex items-center text-xs font-mono text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-100">
                             <GitBranch className="w-3 h-3 mr-1" />
-                            {snapshot.version}
+                            {snapshotLabel}
                           </span>
                         ) : (
                           <span className="text-xs text-gray-400 italic">—</span>

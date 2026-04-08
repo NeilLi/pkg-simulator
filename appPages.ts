@@ -56,7 +56,6 @@ export const FEATURE_SEQUENCE: AppPage[] = [
   AppPage.MEMORY,
   
   // Creation (Simulator/Mother) - Gemini as architect
-  AppPage.SEED_DATA,
   AppPage.POLICY_ASSISTANT,
   AppPage.POLICY_STUDIO,
   
@@ -133,15 +132,15 @@ export const PAGE_METADATA: Partial<Record<AppPage, PageMetadata>> = {
     description: 'Browse temporal facts, playback evidence, and system memory',
   },
   [AppPage.SEED_DATA]: {
-    label: 'Mission Seeds',
-    description: 'Generate governed mission requests and incident scenarios using Gemini and PKG policy',
+    label: 'Mission Seeds (Legacy Local)',
+    description: 'Legacy local generator backed by db-proxy endpoints; not aligned to the latest SeedCore API contract',
   },
   [AppPage.POLICY_STUDIO]: {
-    label: 'Policy Studio',
-    description: 'Create and evolve runtime policy artifacts with AI-assisted generation',
+    label: 'Policy Studio (Advanced)',
+    description: 'Advanced authoring for snapshots, rules, and facts with AI-assisted generation',
   },
   [AppPage.POLICY_ASSISTANT]: {
-    label: 'Policy Assistant',
+    label: 'Policy Assistant (Guided)',
     description: 'Guided policy setup for non-experts with preflight and scenario simulation before commit',
   },
   [AppPage.SIMULATOR]: {
@@ -160,9 +159,5 @@ export const PAGE_METADATA: Partial<Record<AppPage, PageMetadata>> = {
   [AppPage.GOVERNANCE_COCKPIT]: {
     label: 'Governance Cockpit',
     description: 'Mission control center for perception, temporal policy, custody state, and digital twin validation',
-  },
-  [AppPage.SIMULATOR]: {
-    label: 'Simulator',
-    description: 'Virtual world for zero-trust runtime testing before deployment. Adjacent to Governance Cockpit for seamless workflow.',
   },
 };

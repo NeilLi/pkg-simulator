@@ -817,6 +817,9 @@ export const PolicyStudio: React.FC = () => {
             <p className="text-sm text-gray-500 mt-1">
               Create and evolve policy artifacts: snapshots, rules, and facts
             </p>
+            <p className="text-xs text-gray-500 mt-2">
+              Need a guided setup flow with preflight/scenario checks? Use <span className="font-medium">Policy Assistant (Guided)</span> from the sidebar first.
+            </p>
 
             <div className="mt-3 flex flex-wrap items-center gap-3">
               <div className="text-xs text-gray-500">Environment</div>

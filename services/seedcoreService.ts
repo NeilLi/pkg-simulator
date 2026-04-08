@@ -73,6 +73,9 @@ export interface Fact {
   text: string;
   tags?: string[];
   metadata?: Record<string, any>;
+  meta_data?: Record<string, any>;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface HealthResponse {
@@ -1017,11 +1020,20 @@ class SeedCoreService {
    * List all facts
    */
   async listFacts(): Promise<Fact[]> {
-    const response = await this.request<{ items: Fact[]; total: number }>(
+    const response = await this.request<{ items?: any[]; total?: number }>(
       "GET",
       "/facts"
     );
-    return response.items;
+    const items = Array.isArray(response?.items) ? response.items : [];
+    return items.map((item) => ({
+      id: String(item?.id || ""),
+      text: String(item?.text || ""),
+      tags: Array.isArray(item?.tags) ? item.tags : [],
+      metadata: (item?.metadata || item?.meta_data || {}) as Record<string, any>,
+      meta_data: (item?.meta_data || item?.metadata || {}) as Record<string, any>,
+      created_at: typeof item?.created_at === "string" ? item.created_at : undefined,
+      updated_at: typeof item?.updated_at === "string" ? item.updated_at : undefined,
+    }));
   }
 
   /**

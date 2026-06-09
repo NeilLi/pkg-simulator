@@ -67,6 +67,8 @@ The simulator must expect DB metadata drift and surface it, not assume every sna
 
 ## Recommended refactor shape
 
+This refactor should be treated as one part of the broader PDP simulator infrastructure plan in [`SEEDCORE_PDP_SIMULATOR_INFRA_PLAN.md`](./SEEDCORE_PDP_SIMULATOR_INFRA_PLAN.md). The control plane should gate policy supply-chain safety, while the PDP workbench should prove authority portability, causal freshness, and CDC-backed local context.
+
 ### Lane A: SeedCore runtime truth
 
 This should become the blocking deployment lane:
